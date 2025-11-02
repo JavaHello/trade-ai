@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
-use notify_rust::Notification;
+use notify_rust::{CloseReason, Hint, Notification};
 use reqwest::Client;
 use reqwest_websocket::{Message, RequestBuilderExt};
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio::time::interval;
@@ -69,6 +70,7 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     });
 
+    let param2 = param.clone();
     task::spawn(async move {
         let mut send_flag = false;
         while let Some(msg) = mrx.recv().await {
@@ -77,12 +79,22 @@ async fn main() -> Result<(), anyhow::Error> {
                 continue;
             }
             if !send_flag {
+                send_flag = true;
                 Notification::new()
                     .summary("价格监控")
                     .body(&msg)
+                    .hint(Hint::Urgency(notify_rust::Urgency::Critical))
+                    .action("open", "okx")
                     .show()
-                    .unwrap();
-                send_flag = true;
+                    .unwrap()
+                    .on_close(|_: CloseReason| {
+                        let _ = Command::new("xdg-open")
+                            .arg(format!(
+                                "https://www.okx.com/zh-hans/trade-swap/{}",
+                                param2.inst_id.clone().to_lowercase()
+                            ))
+                            .spawn();
+                    });
             }
         }
     });
