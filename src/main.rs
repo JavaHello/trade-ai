@@ -1,5 +1,5 @@
 mod config;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use color_eyre::Result;
@@ -15,7 +15,7 @@ use reqwest::Client;
 use reqwest_websocket::{Message, RequestBuilderExt};
 use tokio::sync::mpsc;
 use tokio::task;
-use tokio::time::{Instant, interval};
+use tokio::time::interval;
 
 // {
 //   "id": "1512",
@@ -87,13 +87,18 @@ struct App {
     inst_id: String,
     data: Vec<(f64, f64)>,
     window: [f64; 2],
+    last_draw: Instant,
+    min_redraw_gap: Duration,
 }
 impl App {
     fn new(inst_id: &str) -> App {
+        let min_redraw_gap = Duration::from_millis(100);
         App {
             inst_id: inst_id.to_string(),
             data: vec![],
             window: [0.0, 100.0],
+            last_draw: Instant::now() - min_redraw_gap,
+            min_redraw_gap,
         }
     }
 
@@ -103,16 +108,20 @@ impl App {
         rx: &mut mpsc::Receiver<(f64, i64)>,
     ) -> Result<()> {
         while let Some(message) = rx.recv().await {
-            if event::poll(Duration::from_millis(100))? {
-                if event::read()?
-                    .as_key_press_event()
-                    .is_some_and(|key| key.code == KeyCode::Char('q'))
-                {
-                    return Ok(());
+            let timeout = self.min_redraw_gap.saturating_sub(self.last_draw.elapsed());
+            while event::poll(timeout)? {
+                match event::read()? {
+                    event::Event::Key(key_event) if key_event.code == KeyCode::Char('q') => {
+                        return Ok(());
+                    }
+                    _ => {}
                 }
             }
             self.on_tick(message.0, message.1);
-            terminal.draw(|frame| self.render(frame))?;
+            if self.last_draw.elapsed() >= self.min_redraw_gap {
+                terminal.draw(|frame| self.render(frame))?;
+                self.last_draw = Instant::now();
+            }
         }
         Ok(())
     }
