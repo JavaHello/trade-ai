@@ -1,15 +1,16 @@
 mod config;
 use std::time::{Duration, Instant};
 
+use chrono::{Local, TimeZone};
 use clap::Parser;
 use color_eyre::Result;
 use crossterm::event::{self, KeyCode};
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
-use ratatui::symbols::{self, Marker};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType, LegendPosition};
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols;
+use ratatui::text::Span;
+use ratatui::widgets::{Axis, Block, Chart, Dataset};
 use ratatui::{DefaultTerminal, Frame};
 use reqwest::Client;
 use reqwest_websocket::{Message, RequestBuilderExt};
@@ -139,94 +140,114 @@ impl App {
         }
     }
     fn render(&self, frame: &mut Frame) {
-        let chunks = Layout::default()
-            .constraints([Constraint::Percentage(100)].as_ref())
-            .margin(1)
-            .split(frame.size());
-        self.render_chart(frame, chunks[0]);
+        self.render_chart(frame, frame.area());
     }
     fn render_chart(&self, frame: &mut Frame, area: Rect) {
+        let x_mid = f64::midpoint(self.window[0], self.window[1]);
         let x_labels = vec![
             Span::styled(
-                format!("{}", self.window[0]),
+                Self::format_timestamp_label(self.window[0]),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("{}", f64::midpoint(self.window[0], self.window[1]))),
+            Span::raw(Self::format_timestamp_label(x_mid)),
             Span::styled(
-                format!("{}", self.window[1]),
+                Self::format_timestamp_label(self.window[1]),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
         ];
+        let (raw_min_y, raw_max_y) = self
+            .data
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), (_, y)| {
+                (min.min(*y), max.max(*y))
+            });
+        let (label_min_y, label_max_y, bounds_min_y, bounds_max_y) =
+            if self.data.is_empty() || !raw_min_y.is_finite() || !raw_max_y.is_finite() {
+                (0.0, 1.0, 0.0, 1.0)
+            } else if (raw_max_y - raw_min_y).abs() < f64::EPSILON {
+                let padding = (raw_max_y.abs() * 0.05).max(1.0);
+                (
+                    raw_min_y,
+                    raw_max_y,
+                    raw_min_y - padding,
+                    raw_max_y + padding,
+                )
+            } else {
+                let padding = (raw_max_y - raw_min_y) * 0.05;
+                (
+                    raw_min_y,
+                    raw_max_y,
+                    raw_min_y - padding,
+                    raw_max_y + padding,
+                )
+            };
+        let y_mid = f64::midpoint(label_min_y, label_max_y);
+        let y_labels = vec![
+            Span::styled(
+                format!("{:.2}", label_min_y),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("{:.2}", y_mid)),
+            Span::styled(
+                format!("{:.2}", label_max_y),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ];
+        let x_bounds = Self::normalize_bounds(self.window);
+        let y_bounds = Self::normalize_bounds([bounds_min_y, bounds_max_y]);
         let datasets = vec![
             Dataset::default()
-                .name(self.inst_id.as_str())
+                // .name(self.inst_id.as_str())
                 .marker(symbols::Marker::Dot)
                 .style(Style::default().fg(Color::Cyan))
                 .data(&self.data),
         ];
-
         let chart = Chart::new(datasets)
-            .block(Block::bordered())
+            .block(Block::bordered().title(self.inst_id.as_str()))
             .x_axis(
                 Axis::default()
                     .title("Time")
                     .style(Style::default().fg(Color::Gray))
                     .labels(x_labels)
-                    .bounds(self.window),
+                    .labels_alignment(Alignment::Left)
+                    .bounds(x_bounds),
             )
             .y_axis(
                 Axis::default()
                     .title("Mark Price")
                     .style(Style::default().fg(Color::Gray))
-                    .labels(vec![
-                        Span::styled(
-                            format!(
-                                "{:.2}",
-                                self.data
-                                    .iter()
-                                    .map(|(_, y)| *y)
-                                    .fold(f64::INFINITY, f64::min)
-                            ),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(format!(
-                            "{:.2}",
-                            (self
-                                .data
-                                .iter()
-                                .map(|(_, y)| *y)
-                                .fold(f64::INFINITY, f64::min)
-                                + self
-                                    .data
-                                    .iter()
-                                    .map(|(_, y)| *y)
-                                    .fold(f64::NEG_INFINITY, f64::max))
-                                / 2.0
-                        )),
-                        Span::styled(
-                            format!(
-                                "{:.2}",
-                                self.data
-                                    .iter()
-                                    .map(|(_, y)| *y)
-                                    .fold(f64::NEG_INFINITY, f64::max)
-                            ),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                    ])
-                    .bounds([
-                        self.data
-                            .iter()
-                            .map(|(_, y)| *y)
-                            .fold(f64::INFINITY, f64::min),
-                        self.data
-                            .iter()
-                            .map(|(_, y)| *y)
-                            .fold(f64::NEG_INFINITY, f64::max),
-                    ]),
+                    .labels(y_labels)
+                    .bounds(y_bounds),
             );
 
         frame.render_widget(chart, area);
+    }
+
+    fn format_timestamp_label(ts_ms: f64) -> String {
+        let rounded = ts_ms.round() as i64;
+        if rounded <= 0 {
+            return "--:--:--".to_string();
+        }
+        let secs = rounded / 1000;
+        let nanos = ((rounded % 1000).abs() as u32) * 1_000_000;
+        Local
+            .timestamp_opt(secs, nanos)
+            .single()
+            .map(|dt| dt.format("%H:%M:%S").to_string())
+            .unwrap_or_else(|| "--:--:--".to_string())
+    }
+
+    fn normalize_bounds(bounds: [f64; 2]) -> [f64; 2] {
+        let (min, max) = if bounds[0] <= bounds[1] {
+            (bounds[0], bounds[1])
+        } else {
+            (bounds[1], bounds[0])
+        };
+        if (max - min).abs() < f64::EPSILON {
+            [min, min + 1.0]
+        } else {
+            [min, max]
+        }
     }
 }
 
@@ -245,6 +266,7 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     });
 
+    #[allow(unused)]
     let np = param.clone();
     task::spawn(async move {
         let mut send_flag = false;
