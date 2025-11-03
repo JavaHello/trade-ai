@@ -18,26 +18,30 @@ impl OsNotification {
     }
     pub async fn run(&mut self) -> Result<(), anyhow::Error> {
         let mut start = tokio::time::Instant::now();
-        while let Ok(message) = self.rx.recv().await {
-            match message {
-                Command::Notify(inst_id, msg) => {
-                    if start.elapsed() <= self.interval {
-                        continue;
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        linux_notify(&msg, &inst_id).await?;
+        loop {
+            match self.rx.recv().await {
+                Ok(message) => match message {
+                    Command::Notify(inst_id, msg) => {
+                        if start.elapsed() <= self.interval {
+                            continue;
+                        }
+                        #[cfg(target_os = "linux")]
+                        {
+                            linux_notify(&msg, &inst_id).await?;
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            // No desktop notification support on this platform.
+                        }
                         start = tokio::time::Instant::now();
                     }
-                    #[cfg(not(target_os = "linux"))]
-                    {
-                        Ok(())
+                    Command::Exit => {
+                        return Ok(());
                     }
-                }
-                Command::Exit => {
-                    return Ok(());
-                }
-                _ => {}
+                    _ => {}
+                },
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
         Ok(())
