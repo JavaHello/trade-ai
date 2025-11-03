@@ -90,16 +90,21 @@ struct App {
     window: [f64; 2],
     last_draw: Instant,
     min_redraw_gap: Duration,
+    retention: Duration,
+    latest_price: f64,
 }
 impl App {
     fn new(inst_id: &str) -> App {
         let min_redraw_gap = Duration::from_millis(100);
+        let retention = Duration::from_secs(5 * 60);
         App {
             inst_id: inst_id.to_string(),
             data: vec![],
             window: [0.0, 100.0],
             last_draw: Instant::now() - min_redraw_gap,
             min_redraw_gap,
+            retention,
+            latest_price: 0.0,
         }
     }
 
@@ -129,14 +134,17 @@ impl App {
     fn on_tick(&mut self, mark_px: f64, ts: i64) {
         let x = ts as f64;
         let y = mark_px;
+        self.latest_price = mark_px;
         self.data.push((x, y));
-        if self.data.len() > 100 {
-            self.data.remove(0);
-        }
+        let retention_ms = self.retention.as_millis() as i64;
+        let cutoff = (ts - retention_ms).max(0) as f64;
+        self.data.retain(|(timestamp, _)| *timestamp >= cutoff);
         if let Some((min_x, _)) = self.data.first() {
             if let Some((max_x, _)) = self.data.last() {
                 self.window = [*min_x, *max_x];
             }
+        } else {
+            self.window = [0.0, 100.0];
         }
     }
     fn render(&self, frame: &mut Frame) {
@@ -197,7 +205,6 @@ impl App {
         let y_bounds = Self::normalize_bounds([bounds_min_y, bounds_max_y]);
         let datasets = vec![
             Dataset::default()
-                // .name(self.inst_id.as_str())
                 .marker(symbols::Marker::Dot)
                 .style(Style::default().fg(Color::Cyan))
                 .data(&self.data),
@@ -214,7 +221,8 @@ impl App {
             )
             .y_axis(
                 Axis::default()
-                    .title("Mark Price")
+                    // .title("Mark Price")
+                    .title(format!("{:.2}", self.latest_price))
                     .style(Style::default().fg(Color::Gray))
                     .labels(y_labels)
                     .bounds(y_bounds),
