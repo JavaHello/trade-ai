@@ -319,7 +319,15 @@ async fn main() -> Result<(), anyhow::Error> {
             tx.send(Message::Text(msg_text)).await.unwrap();
         },
         async move {
-            while let Some(message) = rx.try_next().await.unwrap() {
+            'outer: loop {
+                let Some(message) = (match rx.try_next().await {
+                    Ok(msg) => msg,
+                    Err(_err) => {
+                        break 'outer;
+                    }
+                }) else {
+                    break 'outer;
+                };
                 if let Message::Text(text) = message {
                     if let Ok(mark_price_msg) = serde_json::from_str::<MarkPriceMessage>(&text) {
                         for data in mark_price_msg.data {
@@ -330,20 +338,26 @@ async fn main() -> Result<(), anyhow::Error> {
                             let inst_id = data.inst_id;
                             let mark_px: f64 = data.mark_px.parse().unwrap_or(0.0);
                             let ts: i64 = data.ts.parse().unwrap_or(0);
-                            ttx.send((mark_px, ts)).await.unwrap();
+                            if ttx.send((mark_px, ts)).await.is_err() {
+                                break 'outer;
+                            }
 
                             if mark_px >= param.upper_threshold {
                                 let alert_msg = format!(
                                     "告警: {} 标记价格 {:.2} 超过上限 {:.2}",
                                     inst_id, mark_px, param.upper_threshold
                                 );
-                                mtx.send(alert_msg).await.unwrap();
+                                if mtx.send(alert_msg).await.is_err() {
+                                    break 'outer;
+                                }
                             } else if mark_px <= param.lower_threshold {
                                 let alert_msg = format!(
                                     "告警: {} 标记价格 {:.2} 低于下限 {:.2}",
                                     inst_id, mark_px, param.lower_threshold
                                 );
-                                mtx.send(alert_msg).await.unwrap();
+                                if mtx.send(alert_msg).await.is_err() {
+                                    break 'outer;
+                                }
                             }
                         }
                     } else {
