@@ -34,6 +34,9 @@ impl OsNotification {
                         Ok(())
                     }
                 }
+                Command::Exit => {
+                    return Ok(());
+                }
                 _ => {}
             }
         }

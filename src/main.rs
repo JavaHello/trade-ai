@@ -41,8 +41,14 @@ async fn main() -> Result<(), anyhow::Error> {
             monitor::Monitor::new(param.lower_threshold, param.upper_threshold, mtx, mrx);
         monitor.run().await.unwrap();
     });
+
     let mut app = TuiApp::new(&param.inst_id);
-    app.run(&mut rx).await.unwrap();
+    tokio::select! {
+        _ = app.run(&mut rx) => {},
+        _ = tokio::signal::ctrl_c() => {
+            let _ = tx.send(Command::Exit);
+        }
+    }
     app.dispose();
     Ok(())
 }

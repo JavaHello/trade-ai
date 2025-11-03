@@ -44,6 +44,9 @@ impl Monitor {
                             .send(crate::command::Command::Notify(inst_id.clone(), notify_msg));
                     }
                 }
+                crate::command::Command::Exit => {
+                    break;
+                }
                 _ => {}
             }
         }

@@ -44,24 +44,18 @@ impl TuiApp {
         color_eyre::install()?;
         let mut terminal = ratatui::init();
         while let Ok(message) = rx.recv().await {
-            let timeout = self.min_redraw_gap.saturating_sub(self.last_draw.elapsed());
-            while event::poll(timeout)? {
-                match event::read()? {
-                    event::Event::Key(key_event) if key_event.code == KeyCode::Char('q') => {
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-            }
             match message {
                 Command::MarkPriceUpdate(_inst_id, mark_px, ts) => {
                     self.on_tick(mark_px, ts);
+                    if self.last_draw.elapsed() >= self.min_redraw_gap {
+                        terminal.draw(|frame| self.render(frame)).unwrap();
+                        self.last_draw = Instant::now();
+                    }
+                }
+                Command::Exit => {
+                    return Ok(());
                 }
                 _ => {}
-            }
-            if self.last_draw.elapsed() >= self.min_redraw_gap {
-                terminal.draw(|frame| self.render(frame))?;
-                self.last_draw = Instant::now();
             }
         }
         Ok(())
