@@ -45,10 +45,9 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut app = TuiApp::new(&param.inst_id);
     tokio::select! {
         _ = app.run(&mut rx) => {},
-        _ = tokio::signal::ctrl_c() => {
-            let _ = tx.send(Command::Exit);
-        }
+        _ = tokio::signal::ctrl_c() => {}
     }
+    let _ = tx.send(Command::Exit);
     app.dispose();
     Ok(())
 }

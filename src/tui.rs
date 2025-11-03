@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{Local, TimeZone};
 use color_eyre::Result;
-use crossterm::event::{self, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -43,19 +43,32 @@ impl TuiApp {
     pub async fn run(&mut self, rx: &mut broadcast::Receiver<Command>) -> Result<()> {
         color_eyre::install()?;
         let mut terminal = ratatui::init();
-        while let Ok(message) = rx.recv().await {
-            match message {
-                Command::MarkPriceUpdate(_inst_id, mark_px, ts) => {
-                    self.on_tick(mark_px, ts);
-                    if self.last_draw.elapsed() >= self.min_redraw_gap {
-                        terminal.draw(|frame| self.render(frame)).unwrap();
-                        self.last_draw = Instant::now();
+        let mut input_tick = tokio::time::interval(self.min_redraw_gap);
+        loop {
+            tokio::select! {
+                biased;
+                _ = input_tick.tick() => {
+                    if self.poll_input()? {
+                        return Ok(());
                     }
                 }
-                Command::Exit => {
-                    return Ok(());
+                result = rx.recv() => {
+                    match result {
+                        Ok(Command::MarkPriceUpdate(_inst_id, mark_px, ts)) => {
+                            self.on_tick(mark_px, ts);
+                            if self.last_draw.elapsed() >= self.min_redraw_gap {
+                                terminal.draw(|frame| self.render(frame)).unwrap();
+                                self.last_draw = Instant::now();
+                            }
+                        }
+                        Ok(Command::Exit) => {
+                            return Ok(());
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    }
                 }
-                _ => {}
             }
         }
         Ok(())
@@ -158,6 +171,24 @@ impl TuiApp {
             );
 
         frame.render_widget(chart, area);
+    }
+
+    fn poll_input(&self) -> Result<bool> {
+        while event::poll(Duration::from_millis(0))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                        return Ok(true);
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(true);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        Ok(false)
     }
 
     fn format_timestamp_label(ts_ms: f64) -> String {
