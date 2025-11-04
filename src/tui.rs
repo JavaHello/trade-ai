@@ -4,11 +4,11 @@ use chrono::{Local, TimeZone};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::Span;
-use ratatui::widgets::{Axis, Block, Chart, Dataset};
+use ratatui::widgets::{Axis, Block, Chart, Dataset, Paragraph};
 use tokio::sync::broadcast;
 
 use crate::command::Command;
@@ -21,6 +21,7 @@ pub struct TuiApp {
     min_redraw_gap: Duration,
     retention: Duration,
     latest_price: f64,
+    status_message: Option<String>,
 }
 impl TuiApp {
     pub fn new(inst_id: &str) -> TuiApp {
@@ -34,6 +35,7 @@ impl TuiApp {
             min_redraw_gap,
             retention,
             latest_price: 0.0,
+            status_message: None,
         }
     }
     pub fn dispose(&self) {
@@ -55,11 +57,17 @@ impl TuiApp {
                 result = rx.recv() => {
                     match result {
                         Ok(Command::MarkPriceUpdate(_inst_id, mark_px, ts)) => {
+                            self.status_message = None;
                             self.on_tick(mark_px, ts);
                             if self.last_draw.elapsed() >= self.min_redraw_gap {
-                                terminal.draw(|frame| self.render(frame)).unwrap();
+                                terminal.draw(|frame| self.render(frame))?;
                                 self.last_draw = Instant::now();
                             }
+                        }
+                        Ok(Command::Error(message)) => {
+                            self.status_message = Some(message);
+                            terminal.draw(|frame| self.render(frame))?;
+                            self.last_draw = Instant::now();
                         }
                         Ok(Command::Exit) => {
                             return Ok(());
@@ -90,7 +98,20 @@ impl TuiApp {
         }
     }
     fn render(&self, frame: &mut Frame) {
-        self.render_chart(frame, frame.area());
+        let area = frame.area();
+        if self.status_message.is_some() && area.height >= 4 {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(3)])
+                .split(area);
+            self.render_chart(frame, chunks[0]);
+            self.render_status(frame, chunks[1]);
+        } else {
+            self.render_chart(frame, area);
+            if self.status_message.is_some() {
+                self.render_status(frame, area);
+            }
+        }
     }
     fn render_chart(&self, frame: &mut Frame, area: Rect) {
         let x_mid = f64::midpoint(self.window[0], self.window[1]);
@@ -171,6 +192,16 @@ impl TuiApp {
             );
 
         frame.render_widget(chart, area);
+    }
+    fn render_status(&self, frame: &mut Frame, area: Rect) {
+        if let Some(message) = &self.status_message {
+            let block = Block::bordered().title("Status");
+            let status = Paragraph::new(message.as_str())
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(Alignment::Left)
+                .block(block);
+            frame.render_widget(status, area);
+        }
     }
 
     fn poll_input(&self) -> Result<bool> {

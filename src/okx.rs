@@ -1,11 +1,8 @@
-use anyhow::Ok;
-use futures_util::{
-    SinkExt, StreamExt, TryStreamExt,
-    stream::{SplitSink, SplitStream},
-};
-use reqwest::Client;
+use futures_util::{SinkExt, StreamExt};
+use reqwest::{Client, ClientBuilder};
 use reqwest_websocket::{Message, RequestBuilderExt, WebSocket};
 use tokio::sync::broadcast;
+use tokio::time::{Duration, sleep};
 
 use crate::command::Command;
 
@@ -45,31 +42,35 @@ pub struct MarkPriceData {
 }
 
 pub struct OkxWsClient {
-    pub ws_tx: SplitSink<WebSocket, Message>,
-    pub ws_rx: SplitStream<WebSocket>,
-    pub tx: broadcast::Sender<Command>,
+    client: Client,
+    tx: broadcast::Sender<Command>,
 }
+
+const PUBLIC_WS_ENDPOINT: &str = "wss://ws.okx.com:8443/ws/v5/public";
 
 impl OkxWsClient {
     pub async fn new(btx: broadcast::Sender<Command>) -> Result<OkxWsClient, anyhow::Error> {
-        // println!("AppContext initialized: {:?}", ctx);
-        let websocket = Client::default()
-            .get("wss://ws.okx.com:8443/ws/v5/public")
-            .upgrade()
-            .send()
-            .await?
-            .into_websocket()
-            .await?;
-
-        let (tx, rx) = websocket.split();
         Ok(OkxWsClient {
-            ws_tx: tx,
-            ws_rx: rx,
+            client: ClientBuilder::new()
+                .connect_timeout(Duration::from_secs(5))
+                .read_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(20))
+                .build()?,
             tx: btx,
         })
     }
 
-    pub async fn subscribe_mark_price(&mut self, inst_id: &str) -> Result<(), anyhow::Error> {
+    fn emit_error(&self, message: impl Into<String>) {
+        let _ = self.tx.send(Command::Error(message.into()));
+    }
+
+    async fn connect(&self) -> Result<WebSocket, anyhow::Error> {
+        let response = self.client.get(PUBLIC_WS_ENDPOINT).upgrade().send().await?;
+
+        Ok(response.into_websocket().await?)
+    }
+
+    pub async fn subscribe_mark_price(&self, inst_id: &str) -> Result<(), anyhow::Error> {
         let sub_msg = SubscribeMessage {
             id: None,
             op: "subscribe".to_string(),
@@ -78,27 +79,62 @@ impl OkxWsClient {
                 inst_id: inst_id.to_string(),
             }],
         };
-        let msg_text = serde_json::to_string(&sub_msg)?;
-        self.ws_tx.send(Message::Text(msg_text)).await?;
+        let subscribe_payload = serde_json::to_string(&sub_msg)?;
+        let mut backoff = Duration::from_secs(1);
+        let max_backoff = Duration::from_secs(32);
 
-        while let Some(message) = self.ws_rx.try_next().await? {
-            if let Message::Text(text) = message {
-                let msg = serde_json::from_str::<MarkPriceMessage>(&text);
-                if msg.is_err() {
-                    continue;
+        loop {
+            match self.connect().await {
+                Ok(websocket) => {
+                    backoff = Duration::from_secs(1);
+                    let (mut ws_tx, mut ws_rx) = websocket.split();
+
+                    if let Err(err) = ws_tx.send(Message::Text(subscribe_payload.clone())).await {
+                        self.emit_error(format!("failed to send subscribe request: {err}"));
+                    } else {
+                        while let Some(result) = ws_rx.next().await {
+                            match result {
+                                Ok(Message::Text(text)) => {
+                                    if let Ok(msg) = serde_json::from_str::<MarkPriceMessage>(&text)
+                                    {
+                                        for data in msg.data {
+                                            let inst_id = data.inst_id;
+                                            let mark_px: f64 = data.mark_px.parse().unwrap_or(0.0);
+                                            let ts: i64 = data.ts.parse().unwrap_or(0);
+                                            let _ = self.tx.send(Command::MarkPriceUpdate(
+                                                inst_id, mark_px, ts,
+                                            ));
+                                        }
+                                    }
+                                }
+                                Ok(Message::Ping(payload)) => {
+                                    if let Err(err) = ws_tx.send(Message::Pong(payload)).await {
+                                        self.emit_error(format!("failed to reply pong: {err}"));
+                                        break;
+                                    }
+                                }
+                                Ok(Message::Close { code, reason }) => {
+                                    self.emit_error(format!(
+                                        "websocket closed by server: code={code}, reason={reason:?}"
+                                    ));
+                                    break;
+                                }
+                                Ok(Message::Pong(_)) | Ok(Message::Binary(_)) => {}
+                                Err(err) => {
+                                    self.emit_error(format!("websocket read error: {err}"));
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
-                for data in msg.unwrap().data {
-                    let inst_id = data.inst_id;
-                    let mark_px: f64 = data.mark_px.parse().unwrap_or(0.0);
-                    let ts: i64 = data.ts.parse().unwrap_or(0);
-                    if self
-                        .tx
-                        .send(Command::MarkPriceUpdate(inst_id, mark_px, ts))
-                        .is_err()
-                    {}
+                Err(err) => {
+                    self.emit_error(format!("failed to connect to okx websocket: {err}"));
                 }
             }
+
+            sleep(backoff).await;
+            backoff = (backoff * 2).min(max_backoff);
         }
-        Ok(())
     }
 }
