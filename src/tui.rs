@@ -21,6 +21,7 @@ pub struct TuiApp {
     min_redraw_gap: Duration,
     retention: Duration,
     latest_price: f64,
+    price_precision: Option<usize>,
     status_message: Option<String>,
 }
 impl TuiApp {
@@ -35,6 +36,7 @@ impl TuiApp {
             min_redraw_gap,
             retention,
             latest_price: 0.0,
+            price_precision: None,
             status_message: None,
         }
     }
@@ -56,9 +58,9 @@ impl TuiApp {
                 }
                 result = rx.recv() => {
                     match result {
-                        Ok(Command::MarkPriceUpdate(_inst_id, mark_px, ts)) => {
+                        Ok(Command::MarkPriceUpdate(_inst_id, mark_px, ts, precision)) => {
                             self.status_message = None;
-                            self.on_tick(mark_px, ts);
+                            self.on_tick(mark_px, ts, precision);
                             if self.last_draw.elapsed() >= self.min_redraw_gap {
                                 terminal.draw(|frame| self.render(frame))?;
                                 self.last_draw = Instant::now();
@@ -81,7 +83,10 @@ impl TuiApp {
         }
         Ok(())
     }
-    fn on_tick(&mut self, mark_px: f64, ts: i64) {
+    fn on_tick(&mut self, mark_px: f64, ts: i64, precision: usize) {
+        if self.price_precision.is_none() || (self.price_precision == Some(0) && precision > 0) {
+            self.price_precision = Some(precision);
+        }
         let x = ts as f64;
         let y = mark_px;
         self.latest_price = mark_px;
@@ -155,12 +160,12 @@ impl TuiApp {
         let y_mid = f64::midpoint(label_min_y, label_max_y);
         let y_labels = vec![
             Span::styled(
-                format!("{:.2}", label_min_y),
+                self.format_price(label_min_y),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("{:.2}", y_mid)),
+            Span::raw(self.format_price(y_mid)),
             Span::styled(
-                format!("{:.2}", label_max_y),
+                self.format_price(label_max_y),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
         ];
@@ -185,7 +190,7 @@ impl TuiApp {
             .y_axis(
                 Axis::default()
                     // .title("Mark Price")
-                    .title(format!("{:.2}", self.latest_price))
+                    .title(self.format_price(self.latest_price))
                     .style(Style::default().fg(Color::Gray))
                     .labels(y_labels)
                     .bounds(y_bounds),
@@ -247,5 +252,14 @@ impl TuiApp {
         } else {
             [min, max]
         }
+    }
+
+    fn price_precision(&self) -> usize {
+        self.price_precision.unwrap_or(2)
+    }
+
+    fn format_price(&self, value: f64) -> String {
+        let precision = self.price_precision();
+        format!("{value:.prec$}", value = value, prec = precision)
     }
 }
