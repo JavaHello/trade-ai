@@ -29,7 +29,11 @@ impl OsNotification {
                         {
                             linux_notify(&msg, &inst_id).await?;
                         }
-                        #[cfg(not(target_os = "linux"))]
+                        #[cfg(target_os = "macos")]
+                        {
+                            macos_notify(&msg, &inst_id).await?;
+                        }
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
                         {
                             // No desktop notification support on this platform.
                         }
@@ -66,5 +70,25 @@ async fn linux_notify(msg: &str, inst_id: &str) -> Result<(), anyhow::Error> {
                 ))
                 .spawn();
         });
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn macos_notify(msg: &str, inst_id: &str) -> Result<(), anyhow::Error> {
+    use tokio::process::Command;
+
+    // Basic escaping for quotes so AppleScript parses the message correctly.
+    let escaped_msg = msg.replace('"', "\\\"");
+    let escaped_inst = inst_id.replace('"', "\\\"");
+    let script = format!(
+        r#"display notification "{}" with title "{}" subtitle "{}""#,
+        escaped_msg, "价格监控", escaped_inst
+    );
+
+    Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .status()
+        .await?;
     Ok(())
 }

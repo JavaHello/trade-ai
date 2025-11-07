@@ -26,7 +26,12 @@ impl Monitor {
         loop {
             match self.rx.recv().await {
                 Ok(message) => match message {
-                    crate::command::Command::MarkPriceUpdate(inst_id, mark_price, _ts, _precision) => {
+                    crate::command::Command::MarkPriceUpdate(
+                        inst_id,
+                        mark_price,
+                        _ts,
+                        _precision,
+                    ) => {
                         if mark_price < self.lower_threshold {
                             let notify_msg = format!(
                                 "{} 当前标记价格 {:.4} 低于下限 {:.4}",

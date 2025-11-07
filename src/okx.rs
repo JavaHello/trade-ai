@@ -97,17 +97,17 @@ impl OkxWsClient {
                                 Ok(Message::Text(text)) => {
                                     if let Ok(msg) = serde_json::from_str::<MarkPriceMessage>(&text)
                                     {
-                                            for data in msg.data {
-                                                let inst_id = data.inst_id;
-                                                let mark_px: f64 = data.mark_px.parse().unwrap_or(0.0);
-                                                let ts: i64 = data.ts.parse().unwrap_or(0);
-                                                let precision = Self::decimal_places(&data.mark_px);
-                                                let _ = self.tx.send(Command::MarkPriceUpdate(
-                                                    inst_id, mark_px, ts, precision,
-                                                ));
-                                            }
+                                        for data in msg.data {
+                                            let inst_id = data.inst_id;
+                                            let mark_px: f64 = data.mark_px.parse().unwrap_or(0.0);
+                                            let ts: i64 = data.ts.parse().unwrap_or(0);
+                                            let precision = Self::decimal_places(&data.mark_px);
+                                            let _ = self.tx.send(Command::MarkPriceUpdate(
+                                                inst_id, mark_px, ts, precision,
+                                            ));
                                         }
                                     }
+                                }
                                 Ok(Message::Ping(payload)) => {
                                     if let Err(err) = ws_tx.send(Message::Pong(payload)).await {
                                         self.emit_error(format!("failed to reply pong: {err}"));
