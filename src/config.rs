@@ -136,7 +136,7 @@ fn parse_duration_spec(input: &str) -> Result<Duration, String> {
             return Err(format!(
                 "unsupported duration unit `{}` (use s, m, h, or d)",
                 other
-            ))
+            ));
         }
     };
     let seconds = value * seconds_multiplier;

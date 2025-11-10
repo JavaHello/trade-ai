@@ -21,6 +21,15 @@ async fn main() -> Result<(), anyhow::Error> {
     use tokio::sync::broadcast;
 
     let (tx, mut rx) = broadcast::channel::<Command>(16);
+    let history_window = param.history_window();
+    let history_points =
+        match okx::bootstrap_history(&param.inst_ids, history_window, tx.clone()).await {
+            Ok(points) => points,
+            Err(err) => {
+                let _ = tx.send(Command::Error(format!("history bootstrap error: {err}")));
+                Vec::new()
+            }
+        };
     let pok = param.clone();
     let ttx = tx.clone();
     task::spawn(async move {
@@ -52,7 +61,10 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     });
 
-    let mut app = TuiApp::new(&param.inst_ids, param.history_window());
+    let mut app = TuiApp::new(&param.inst_ids, history_window);
+    if !history_points.is_empty() {
+        app.preload_history(&history_points);
+    }
     let app_result = tokio::select! {
         result = app.run(&mut rx) => result,
         _ = tokio::signal::ctrl_c() => Ok(()),

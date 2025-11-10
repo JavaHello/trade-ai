@@ -14,7 +14,7 @@ use ratatui::widgets::GraphType;
 use ratatui::widgets::{Axis, Block, Chart, Dataset, Paragraph};
 use tokio::sync::broadcast;
 
-use crate::command::Command;
+use crate::command::{Command, PricePoint};
 
 const COLOR_PALETTE: [Color; 8] = [
     Color::Cyan,
@@ -96,6 +96,10 @@ impl TuiApp {
         ratatui::restore();
     }
 
+    pub fn preload_history(&mut self, points: &[PricePoint]) {
+        self.load_history(points);
+    }
+
     pub async fn run(&mut self, rx: &mut broadcast::Receiver<Command>) -> Result<()> {
         color_eyre::install()?;
         let mut terminal = ratatui::init();
@@ -134,6 +138,17 @@ impl TuiApp {
             }
         }
         Ok(())
+    }
+    fn load_history(&mut self, points: &[PricePoint]) {
+        if points.is_empty() {
+            return;
+        }
+        let mut sorted = points.to_vec();
+        sorted.sort_by_key(|point| point.ts);
+        for point in sorted {
+            self.on_tick(&point.inst_id, point.mark_px, point.ts, point.precision);
+        }
+        self.status_message = Some(format!("Loaded {} historical points", points.len()));
     }
     fn on_tick(&mut self, inst_id: &str, mark_px: f64, ts: i64, precision: usize) {
         if !self.inst_ids.iter().any(|id| id == inst_id) {
