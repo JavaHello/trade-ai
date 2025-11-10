@@ -52,7 +52,7 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     });
 
-    let mut app = TuiApp::new(&param.inst_ids);
+    let mut app = TuiApp::new(&param.inst_ids, param.history_window());
     let app_result = tokio::select! {
         result = app.run(&mut rx) => result,
         _ = tokio::signal::ctrl_c() => Ok(()),

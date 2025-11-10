@@ -62,9 +62,8 @@ pub struct TuiApp {
     multi_axis: bool,
 }
 impl TuiApp {
-    pub fn new(inst_ids: &[String]) -> TuiApp {
+    pub fn new(inst_ids: &[String], retention: Duration) -> TuiApp {
         let min_redraw_gap = Duration::from_millis(100);
-        let retention = Duration::from_secs(5 * 60);
         let inst_ids = if inst_ids.is_empty() {
             vec!["BTC-USDT-SWAP".to_string()]
         } else {

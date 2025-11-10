@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -18,6 +19,10 @@ pub struct CliParams {
     /// Per-instrument thresholds in format INST:LOWER:UPPER; repeat as needed
     #[clap(long = "threshold", value_name = "INST:LOWER:UPPER")]
     pub thresholds: Vec<ThresholdSpec>,
+
+    /// Amount of history the TUI keeps in memory (e.g., 15m, 1h, 1d)
+    #[clap(long = "window", value_name = "DURATION", default_value = "15m")]
+    pub window: DurationSpec,
 }
 
 #[derive(Clone, Debug)]
@@ -76,4 +81,71 @@ impl CliParams {
         }
         map
     }
+
+    pub fn history_window(&self) -> Duration {
+        self.window.as_duration()
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct DurationSpec(Duration);
+
+impl DurationSpec {
+    pub fn as_duration(&self) -> Duration {
+        self.0
+    }
+}
+
+impl FromStr for DurationSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let duration = parse_duration_spec(s)?;
+        Ok(DurationSpec(duration))
+    }
+}
+
+fn parse_duration_spec(input: &str) -> Result<Duration, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("duration spec cannot be empty (examples: 15m, 1h, 1d)".to_string());
+    }
+    let split_idx = trimmed
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .ok_or_else(|| "duration spec must end with a unit like s, m, h, or d".to_string())?;
+    if split_idx == 0 {
+        return Err("duration spec must start with a number (examples: 15m, 1h)".to_string());
+    }
+    let (value_part, unit_part) = trimmed.split_at(split_idx);
+    let value: f64 = value_part.parse().map_err(|_| {
+        format!(
+            "invalid numeric portion `{}` in duration spec `{}`",
+            value_part, trimmed
+        )
+    })?;
+    let unit = unit_part.trim().to_lowercase();
+    if unit.is_empty() {
+        return Err("duration spec missing unit (use s, m, h, or d)".to_string());
+    }
+    let seconds_multiplier = match unit.as_str() {
+        "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60.0,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 60.0 * 60.0,
+        "d" | "day" | "days" => 60.0 * 60.0 * 24.0,
+        other => {
+            return Err(format!(
+                "unsupported duration unit `{}` (use s, m, h, or d)",
+                other
+            ))
+        }
+    };
+    let seconds = value * seconds_multiplier;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err(format!("duration must be positive: `{}`", trimmed));
+    }
+    let max_seconds = Duration::MAX.as_secs_f64();
+    if seconds > max_seconds {
+        return Err(format!("duration `{}` is too large", trimmed));
+    }
+    Ok(Duration::from_secs_f64(seconds))
 }
