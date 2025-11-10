@@ -37,6 +37,14 @@ struct AxisInfo {
     max: f64,
 }
 
+#[derive(Clone, Debug)]
+struct PricePanelEntry {
+    inst_id: String,
+    color: Color,
+    price: f64,
+    change_pct: Option<f64>,
+}
+
 pub struct TuiApp {
     inst_ids: Vec<String>,
     colors: HashMap<String, Color>,
@@ -171,16 +179,6 @@ impl TuiApp {
     }
     fn render_chart(&self, frame: &mut Frame, area: Rect) {
         let multi_axis_active = self.multi_axis_active();
-        let (chart_area, axis_area) = if multi_axis_active && area.width > 20 {
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(40), Constraint::Length(18)])
-                .split(area);
-            (chunks[0], Some(chunks[1]))
-        } else {
-            (area, None)
-        };
-
         let x_mid = f64::midpoint(self.window[0], self.window[1]);
         let x_labels = vec![
             Span::styled(
@@ -195,6 +193,7 @@ impl TuiApp {
         ];
         let mut views: Vec<(&str, Cow<'_, [(f64, f64)]>, Color)> = Vec::new();
         let mut axis_infos: Vec<AxisInfo> = Vec::new();
+        let mut price_entries: Vec<PricePanelEntry> = Vec::new();
         let mut raw_min_y = f64::INFINITY;
         let mut raw_max_y = f64::NEG_INFINITY;
         for inst_id in &self.inst_ids {
@@ -207,6 +206,16 @@ impl TuiApp {
             let (points, axis_info) = self.series_view(inst_id, source, multi_axis_active, color);
             if let Some(info) = axis_info {
                 axis_infos.push(info);
+            }
+            if self.normalize {
+                if let Some(price) = self.latest_prices.get(inst_id).copied() {
+                    price_entries.push(PricePanelEntry {
+                        inst_id: inst_id.clone(),
+                        color,
+                        price,
+                        change_pct: self.normalized_latest_value(inst_id),
+                    });
+                }
             }
             for (_, y) in points.iter() {
                 if y.is_finite() {
@@ -251,9 +260,14 @@ impl TuiApp {
                 Style::default().add_modifier(Modifier::BOLD),
             ),
         ];
-        let x_bounds = Self::normalize_bounds(self.window);
-        let zoomed_bounds = self.apply_y_zoom(bounds_min_y, bounds_max_y);
-        let y_bounds = Self::normalize_bounds(zoomed_bounds);
+        let x_bounds = if self.window[0] < self.window[1] {
+            self.window
+        } else if (self.window[0] - self.window[1]).abs() < f64::EPSILON {
+            [self.window[0] - 1.0, self.window[1] + 1.0]
+        } else {
+            [self.window[1], self.window[0]]
+        };
+        let y_bounds = self.apply_y_zoom(bounds_min_y, bounds_max_y);
         let datasets: Vec<Dataset> = views
             .iter()
             .map(|(inst_id, points, color)| {
@@ -283,9 +297,33 @@ impl TuiApp {
                     .bounds(y_bounds),
             );
 
+        enum PanelKind {
+            MultiAxis,
+            Price,
+        }
+        let panel_kind = if multi_axis_active && !axis_infos.is_empty() {
+            Some(PanelKind::MultiAxis)
+        } else if self.normalize && !price_entries.is_empty() {
+            Some(PanelKind::Price)
+        } else {
+            None
+        };
+        let (chart_area, axis_area) = if panel_kind.is_some() && area.width > 20 {
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(40), Constraint::Length(20)])
+                .split(area);
+            (chunks[0], Some(chunks[1]))
+        } else {
+            (area, None)
+        };
+
         frame.render_widget(chart, chart_area);
-        if let (Some(axis_area), true) = (axis_area, multi_axis_active) {
-            self.render_multi_axis(frame, axis_area, &axis_infos);
+        if let (Some(axis_area), Some(panel_kind)) = (axis_area, panel_kind) {
+            match panel_kind {
+                PanelKind::MultiAxis => self.render_multi_axis(frame, axis_area, &axis_infos),
+                PanelKind::Price => self.render_price_panel(frame, axis_area, &price_entries),
+            }
         }
     }
     fn chart_title_line(&self) -> Line<'static> {
@@ -319,7 +357,7 @@ impl TuiApp {
         let mut badges = Vec::new();
         if self.normalize {
             badges.push(Span::styled(
-                "[归一化]",
+                "[Normalized]",
                 Style::default()
                     .fg(Color::LightGreen)
                     .add_modifier(Modifier::BOLD),
@@ -328,13 +366,13 @@ impl TuiApp {
         if self.multi_axis {
             let (label, style) = if self.multi_axis_active() {
                 (
-                    "[多 Y 轴]",
+                    "[Multi Y]",
                     Style::default()
                         .fg(Color::LightMagenta)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                ("[多 Y 轴待用]", Style::default().fg(Color::DarkGray))
+                ("[Multi Y Pending]", Style::default().fg(Color::DarkGray))
             };
             badges.push(Span::styled(label, style));
         }
@@ -342,17 +380,8 @@ impl TuiApp {
     }
 
     fn axis_title(&self) -> String {
-        if let Some(inst_id) = &self.last_update {
-            if let Some(value) = self.latest_display_value(inst_id) {
-                if self.normalize {
-                    return format!("Δ% {} {}", inst_id, self.format_percent(value));
-                } else if !self.multi_axis_active() {
-                    return format!("{} {}", inst_id, self.format_price_for(inst_id, value));
-                }
-            }
-        }
         if self.normalize {
-            "Δ% (相对首个采样点)".to_string()
+            "Δ% (Relative Change)".to_string()
         } else if self.multi_axis_active() {
             "Scaled (0-1)".to_string()
         } else {
@@ -425,6 +454,34 @@ impl TuiApp {
             lines.push(Line::from(" "));
         }
         let block = Block::bordered().title("Y Axis");
+        let paragraph = Paragraph::new(lines)
+            .alignment(Alignment::Left)
+            .block(block);
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_price_panel(&self, frame: &mut Frame, area: Rect, entries: &[PricePanelEntry]) {
+        if entries.is_empty() {
+            return;
+        }
+        let mut lines = Vec::new();
+        for entry in entries {
+            lines.push(Line::from(vec![Span::styled(
+                entry.inst_id.as_str(),
+                Style::default()
+                    .fg(entry.color)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from(format!(
+                "Price {}",
+                self.format_price_for(&entry.inst_id, entry.price)
+            )));
+            if let Some(change) = entry.change_pct {
+                lines.push(Line::from(format!("Δ {}", self.format_percent(change))));
+            }
+            lines.push(Line::from(" "));
+        }
+        let block = Block::bordered().title("Live Prices");
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
             .block(block);
@@ -596,11 +653,14 @@ impl TuiApp {
                         self.y_zoom = 1.0;
                         self.status_message = Some(match (self.normalize, self.multi_axis) {
                             (true, true) => {
-                                "已切换到相对涨跌幅模式，多 Y 轴将在退出后恢复 (N)".to_string()
+                                "Relative change mode enabled; multi Y resumes once you exit (N)"
+                                    .to_string()
                             }
-                            (true, false) => "已切换到相对涨跌幅模式 (N)".to_string(),
-                            (false, true) => "已切换到绝对价格模式，多 Y 轴已恢复 (N)".to_string(),
-                            (false, false) => "已切换到绝对价格模式 (N)".to_string(),
+                            (true, false) => "Relative change mode enabled (N)".to_string(),
+                            (false, true) => {
+                                "Absolute price mode enabled; multi Y restored (N)".to_string()
+                            }
+                            (false, false) => "Absolute price mode enabled (N)".to_string(),
                         });
                     }
                     KeyCode::Char('m') | KeyCode::Char('M') => {
@@ -608,28 +668,29 @@ impl TuiApp {
                         self.y_zoom = 1.0;
                         self.status_message = Some(match (self.multi_axis, self.normalize) {
                             (true, true) => {
-                                "已预开启多 Y 轴模式，退出相对涨跌幅模式后即刻生效 (M)".to_string()
+                                "Multi Y axis pre-enabled; activates once you leave relative mode (M)"
+                                    .to_string()
                             }
-                            (true, false) => "已开启多 Y 轴模式 (M)".to_string(),
+                            (true, false) => "Multi Y axis mode enabled (M)".to_string(),
                             (false, true) => {
-                                "已关闭多 Y 轴模式，当前仍处于相对涨跌幅模式 (M)".to_string()
+                                "Multi Y axis disabled; still in relative mode (M)".to_string()
                             }
-                            (false, false) => "已关闭多 Y 轴模式 (M)".to_string(),
+                            (false, false) => "Multi Y axis mode disabled (M)".to_string(),
                         });
                     }
                     KeyCode::Char('+') | KeyCode::Char('=') => {
                         self.y_zoom = (self.y_zoom * 1.25).min(100.0);
                         self.status_message =
-                            Some(format!("放大纵坐标 (Zoom {:.2}x)", self.y_zoom));
+                            Some(format!("Zoomed in Y axis (Zoom {:.2}x)", self.y_zoom));
                     }
                     KeyCode::Char('-') => {
                         self.y_zoom = (self.y_zoom / 1.25).max(0.05);
                         self.status_message =
-                            Some(format!("缩小纵坐标 (Zoom {:.2}x)", self.y_zoom));
+                            Some(format!("Zoomed out Y axis (Zoom {:.2}x)", self.y_zoom));
                     }
                     KeyCode::Char('0') => {
                         self.y_zoom = 1.0;
-                        self.status_message = Some("已重置纵坐标 (0)".to_string());
+                        self.status_message = Some("Reset Y axis (0)".to_string());
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Ok(true);
@@ -654,19 +715,6 @@ impl TuiApp {
             .single()
             .map(|dt| dt.format("%H:%M:%S").to_string())
             .unwrap_or_else(|| "--:--:--".to_string())
-    }
-
-    fn normalize_bounds(bounds: [f64; 2]) -> [f64; 2] {
-        let (min, max) = if bounds[0] <= bounds[1] {
-            (bounds[0], bounds[1])
-        } else {
-            (bounds[1], bounds[0])
-        };
-        if (max - min).abs() < f64::EPSILON {
-            [min, min + 1.0]
-        } else {
-            [min, max]
-        }
     }
 
     fn price_precision(&self) -> usize {

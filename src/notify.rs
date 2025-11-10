@@ -56,7 +56,7 @@ async fn linux_notify(msg: &str, inst_id: &str) -> Result<(), anyhow::Error> {
     use notify_rust::{CloseReason, Hint, Notification};
     use tokio::process::Command;
     Notification::new()
-        .summary("价格监控")
+        .summary("Price Monitor")
         .body(msg)
         .hint(Hint::Urgency(notify_rust::Urgency::Critical))
         .action("open", "okx")
@@ -82,7 +82,7 @@ async fn macos_notify(msg: &str, inst_id: &str) -> Result<(), anyhow::Error> {
     let escaped_inst = inst_id.replace('"', "\\\"");
     let script = format!(
         r#"display notification "{}" with title "{}" subtitle "{}""#,
-        escaped_msg, "价格监控", escaped_inst
+        escaped_msg, "Price Monitor", escaped_inst
     );
 
     Command::new("osascript")

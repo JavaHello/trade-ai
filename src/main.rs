@@ -46,11 +46,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let mrx = tx.subscribe();
     let thresholds = param.threshold_map();
     task::spawn(async move {
-        let mut monitor = monitor::Monitor::new(
-            thresholds,
-            mtx,
-            mrx,
-        );
+        let mut monitor = monitor::Monitor::new(thresholds, mtx, mrx);
         if let Err(err) = monitor.run().await {
             let _ = monitor_error_tx.send(Command::Error(format!("monitor error: {err}")));
         }

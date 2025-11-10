@@ -5,7 +5,7 @@ use clap::Parser;
 
 #[derive(Parser, Clone, Debug)]
 pub struct CliParams {
-    /// 需要监控的交易品种，支持使用逗号分隔或多次传入
+    /// Instrument IDs to monitor; comma separated or pass multiple times
     #[clap(
         short = 'i',
         long = "inst-id",
@@ -15,7 +15,7 @@ pub struct CliParams {
     )]
     pub inst_ids: Vec<String>,
 
-    /// 指定单独品种的上下限，格式 INST_ID:LOWER:UPPER，可重复
+    /// Per-instrument thresholds in format INST:LOWER:UPPER; repeat as needed
     #[clap(long = "threshold", value_name = "INST:LOWER:UPPER")]
     pub thresholds: Vec<ThresholdSpec>,
 }

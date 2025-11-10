@@ -30,7 +30,7 @@ impl Monitor {
                         let (lower, upper) = self.threshold_for(&inst_id);
                         if mark_price < lower {
                             let notify_msg = format!(
-                                "{} 当前标记价格 {:.4} 低于下限 {:.4}",
+                                "{} mark price {:.4} is below lower bound {:.4}",
                                 inst_id, mark_price, lower
                             );
                             let _ = self
@@ -38,7 +38,7 @@ impl Monitor {
                                 .send(crate::command::Command::Notify(inst_id.clone(), notify_msg));
                         } else if mark_price > upper {
                             let notify_msg = format!(
-                                "{} 当前标记价格 {:.4} 高于上限 {:.4}",
+                                "{} mark price {:.4} is above upper bound {:.4}",
                                 inst_id, mark_price, upper
                             );
                             let _ = self
