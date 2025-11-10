@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client, ClientBuilder};
 use reqwest_websocket::{Message, RequestBuilderExt, WebSocket};
@@ -70,14 +71,20 @@ impl OkxWsClient {
         Ok(response.into_websocket().await?)
     }
 
-    pub async fn subscribe_mark_price(&self, inst_id: &str) -> Result<(), anyhow::Error> {
+    pub async fn subscribe_mark_price(&self, inst_ids: &[String]) -> Result<(), anyhow::Error> {
+        if inst_ids.is_empty() {
+            return Err(anyhow!("no instrument ids specified"));
+        }
         let sub_msg = SubscribeMessage {
             id: None,
             op: "subscribe".to_string(),
-            args: vec![SubscribeArgs {
-                channel: "mark-price".to_string(),
-                inst_id: inst_id.to_string(),
-            }],
+            args: inst_ids
+                .iter()
+                .map(|inst_id| SubscribeArgs {
+                    channel: "mark-price".to_string(),
+                    inst_id: inst_id.to_string(),
+                })
+                .collect(),
         };
         let subscribe_payload = serde_json::to_string(&sub_msg)?;
         let mut backoff = Duration::from_secs(1);

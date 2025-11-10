@@ -1,25 +1,20 @@
+use std::collections::HashMap;
+
 use tokio::sync::broadcast;
 
 pub struct Monitor {
-    pub lower_threshold: f64,
-    pub upper_threshold: f64,
+    pub thresholds: HashMap<String, (f64, f64)>,
     pub tx: broadcast::Sender<crate::command::Command>,
     pub rx: broadcast::Receiver<crate::command::Command>,
 }
 
 impl Monitor {
     pub fn new(
-        lower_threshold: f64,
-        upper_threshold: f64,
+        thresholds: HashMap<String, (f64, f64)>,
         tx: broadcast::Sender<crate::command::Command>,
         rx: broadcast::Receiver<crate::command::Command>,
     ) -> Monitor {
-        Monitor {
-            lower_threshold,
-            upper_threshold,
-            tx,
-            rx,
-        }
+        Monitor { thresholds, tx, rx }
     }
 
     pub async fn run(&mut self) -> Result<(), anyhow::Error> {
@@ -32,18 +27,19 @@ impl Monitor {
                         _ts,
                         _precision,
                     ) => {
-                        if mark_price < self.lower_threshold {
+                        let (lower, upper) = self.threshold_for(&inst_id);
+                        if mark_price < lower {
                             let notify_msg = format!(
                                 "{} 当前标记价格 {:.4} 低于下限 {:.4}",
-                                inst_id, mark_price, self.lower_threshold
+                                inst_id, mark_price, lower
                             );
                             let _ = self
                                 .tx
                                 .send(crate::command::Command::Notify(inst_id.clone(), notify_msg));
-                        } else if mark_price > self.upper_threshold {
+                        } else if mark_price > upper {
                             let notify_msg = format!(
                                 "{} 当前标记价格 {:.4} 高于上限 {:.4}",
-                                inst_id, mark_price, self.upper_threshold
+                                inst_id, mark_price, upper
                             );
                             let _ = self
                                 .tx
@@ -60,5 +56,12 @@ impl Monitor {
             }
         }
         Ok(())
+    }
+
+    fn threshold_for(&self, inst_id: &str) -> (f64, f64) {
+        self.thresholds
+            .get(inst_id)
+            .copied()
+            .unwrap_or((0.0, f64::MAX))
     }
 }

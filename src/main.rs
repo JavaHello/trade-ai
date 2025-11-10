@@ -26,7 +26,7 @@ async fn main() -> Result<(), anyhow::Error> {
     task::spawn(async move {
         let result = async {
             let client = OkxWsClient::new(ttx.clone()).await?;
-            client.subscribe_mark_price(&pok.inst_id).await
+            client.subscribe_mark_price(&pok.inst_ids).await
         }
         .await;
 
@@ -44,15 +44,19 @@ async fn main() -> Result<(), anyhow::Error> {
     let monitor_error_tx = tx.clone();
     let mtx = tx.clone();
     let mrx = tx.subscribe();
+    let thresholds = param.threshold_map();
     task::spawn(async move {
-        let mut monitor =
-            monitor::Monitor::new(param.lower_threshold, param.upper_threshold, mtx, mrx);
+        let mut monitor = monitor::Monitor::new(
+            thresholds,
+            mtx,
+            mrx,
+        );
         if let Err(err) = monitor.run().await {
             let _ = monitor_error_tx.send(Command::Error(format!("monitor error: {err}")));
         }
     });
 
-    let mut app = TuiApp::new(&param.inst_id);
+    let mut app = TuiApp::new(&param.inst_ids);
     let app_result = tokio::select! {
         result = app.run(&mut rx) => result,
         _ = tokio::signal::ctrl_c() => Ok(()),
