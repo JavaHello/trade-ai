@@ -3,6 +3,7 @@ mod config;
 mod monitor;
 mod notify;
 mod okx;
+mod trade_log;
 mod tui;
 
 use anyhow::anyhow;
@@ -111,6 +112,7 @@ async fn main() -> Result<(), anyhow::Error> {
     });
 
     let mut app = TuiApp::new(&param.inst_ids, history_window, order_tx);
+    app.preload_trade_logs();
     if !history_points.is_empty() {
         app.preload_history(&history_points);
     }

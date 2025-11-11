@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone)]
 pub enum Command {
     MarkPriceUpdate(String, f64, i64, usize),
@@ -8,7 +10,7 @@ pub enum Command {
     Exit,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PricePoint {
     pub inst_id: String,
     pub mark_px: f64,
@@ -16,7 +18,7 @@ pub struct PricePoint {
     pub precision: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum TradeSide {
     Buy,
     Sell,
@@ -31,7 +33,7 @@ impl TradeSide {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRequest {
     pub inst_id: String,
     pub side: TradeSide,
@@ -42,7 +44,7 @@ pub struct TradeRequest {
     pub tag: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeResponse {
     pub inst_id: String,
     pub side: TradeSide,
@@ -53,25 +55,25 @@ pub struct TradeResponse {
     pub success: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TradeEvent {
     Order(TradeResponse),
     Cancel(CancelResponse),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TradingCommand {
     Place(TradeRequest),
     Cancel(CancelOrderRequest),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelOrderRequest {
     pub inst_id: String,
     pub ord_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelResponse {
     pub inst_id: String,
     pub ord_id: String,
@@ -79,13 +81,13 @@ pub struct CancelResponse {
     pub success: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountSnapshot {
     pub positions: Vec<PositionInfo>,
     pub open_orders: Vec<PendingOrderInfo>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionInfo {
     pub inst_id: String,
     pub pos_side: Option<String>,
@@ -94,7 +96,7 @@ pub struct PositionInfo {
     pub lever: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingOrderInfo {
     pub inst_id: String,
     pub ord_id: String,

@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use anyhow::Result as AnyResult;
 use chrono::{Local, TimeZone};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -21,6 +22,7 @@ use crate::command::{
     AccountSnapshot, CancelOrderRequest, Command, PendingOrderInfo, PositionInfo, PricePoint,
     TradeEvent, TradeRequest, TradeSide, TradingCommand,
 };
+use crate::trade_log::{TradeLogEntry, TradeLogStore};
 
 const COLOR_PALETTE: [Color; 8] = [
     Color::Cyan,
@@ -104,16 +106,14 @@ struct TradeState {
     positions: Vec<PositionInfo>,
     open_orders: Vec<PendingOrderInfo>,
     focus: TradeFocus,
-}
-
-#[derive(Clone, Debug)]
-struct TradeLogEntry {
-    timestamp: chrono::DateTime<chrono::Local>,
-    event: TradeEvent,
+    log_store: Option<TradeLogStore>,
 }
 
 impl TradeState {
-    fn new(order_tx: Option<mpsc::Sender<TradingCommand>>) -> Self {
+    fn new(
+        order_tx: Option<mpsc::Sender<TradingCommand>>,
+        log_store: Option<TradeLogStore>,
+    ) -> Self {
         TradeState {
             selected_inst_idx: 0,
             selected_position_idx: 0,
@@ -124,6 +124,7 @@ impl TradeState {
             positions: Vec::new(),
             open_orders: Vec::new(),
             focus: TradeFocus::Instruments,
+            log_store,
         }
     }
 
@@ -223,15 +224,34 @@ impl TradeState {
         self.order_tx.as_ref()
     }
 
-    fn record_result(&mut self, event: TradeEvent) {
-        const MAX_LOGS: usize = 64;
-        self.logs.push(TradeLogEntry {
-            timestamp: chrono::Local::now(),
-            event,
-        });
-        if self.logs.len() > MAX_LOGS {
-            self.logs.remove(0);
+    fn load_persisted_logs(&mut self) -> AnyResult<usize> {
+        let Some(store) = &self.log_store else {
+            return Ok(0);
+        };
+        let entries = store.load()?;
+        let count = entries.len();
+        for entry in entries {
+            self.push_log(entry);
         }
+        Ok(count)
+    }
+
+    fn push_log(&mut self, entry: TradeLogEntry) {
+        const MAX_LOGS: usize = 64;
+        self.logs.push(entry);
+        if self.logs.len() > MAX_LOGS {
+            let overflow = self.logs.len() - MAX_LOGS;
+            self.logs.drain(0..overflow);
+        }
+    }
+
+    fn record_result(&mut self, event: TradeEvent) -> AnyResult<()> {
+        let entry = TradeLogEntry::from_event(event);
+        self.push_log(entry.clone());
+        if let Some(store) = &self.log_store {
+            store.append(&entry)?;
+        }
+        Ok(())
     }
 
     fn update_snapshot(&mut self, snapshot: AccountSnapshot, inst_ids: &[String]) {
@@ -373,6 +393,7 @@ impl TuiApp {
             data.insert(inst_id.clone(), Vec::new());
             colors.insert(inst_id.clone(), COLOR_PALETTE[idx % COLOR_PALETTE.len()]);
         }
+        let log_store = TradeLogStore::new(TradeLogStore::default_path());
         TuiApp {
             inst_ids,
             colors,
@@ -391,7 +412,7 @@ impl TuiApp {
             y_zoom: 1.0,
             multi_axis: false,
             view_mode: ViewMode::Chart,
-            trade: TradeState::new(order_tx),
+            trade: TradeState::new(order_tx, Some(log_store)),
         }
     }
 
@@ -430,6 +451,12 @@ impl TuiApp {
 
     pub fn preload_history(&mut self, points: &[PricePoint]) {
         self.load_history(points);
+    }
+
+    pub fn preload_trade_logs(&mut self) {
+        if let Err(err) = self.trade.load_persisted_logs() {
+            self.set_error_status_message(format!("加载历史委托记录失败: {err}"));
+        }
     }
 
     pub async fn run(&mut self, rx: &mut broadcast::Receiver<Command>) -> Result<()> {
@@ -471,7 +498,12 @@ impl TuiApp {
                                     (cancel.message.to_string(), !cancel.success)
                                 }
                             };
-                            self.trade.record_result(event);
+                            let event_for_log = event.clone();
+                            if let Err(err) = self.trade.record_result(event_for_log) {
+                                self.set_error_status_message(format!(
+                                    "记录委托日志失败: {err}"
+                                ));
+                            }
                             if is_error {
                                 self.set_error_status_message(message);
                             } else {
@@ -762,12 +794,7 @@ impl TuiApp {
         frame.render_widget(paragraph, area);
     }
 
-    fn render_trade_header(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        instruction_lines: &[String],
-    ) {
+    fn render_trade_header(&self, frame: &mut Frame, area: Rect, instruction_lines: &[String]) {
         let inst = self
             .trade
             .selected_inst(&self.inst_ids)
@@ -780,27 +807,25 @@ impl TuiApp {
             .map(|value| self.format_price_for(&inst, *value))
             .unwrap_or_else(|| "--".to_string());
         let focus_label = self.trade.focus_label();
-        let lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    "交易页面",
-                    Style::default()
-                        .fg(Color::LightCyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" · "),
-                Span::styled(inst.as_str(), Style::default().fg(Color::LightGreen)),
-                Span::raw(" · 最新价 "),
-                Span::styled(price, Style::default().fg(Color::Yellow)),
-                Span::raw(" · 焦点 "),
-                Span::styled(
-                    focus_label,
-                    Style::default()
-                        .fg(Color::LightMagenta)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-        ];
+        let lines = vec![Line::from(vec![
+            Span::styled(
+                "交易页面",
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" · "),
+            Span::styled(inst.as_str(), Style::default().fg(Color::LightGreen)),
+            Span::raw(" · 最新价 "),
+            Span::styled(price, Style::default().fg(Color::Yellow)),
+            Span::raw(" · 焦点 "),
+            Span::styled(
+                focus_label,
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])];
         let mut lines = lines;
         lines.extend(
             instruction_lines
