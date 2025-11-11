@@ -36,6 +36,8 @@ const COLOR_PALETTE: [Color; 8] = [
 ];
 const EMPTY_SERIES: &[(f64, f64)] = &[];
 const MAX_TRADE_LOGS: usize = 1000;
+const MAX_POSITION_RECORDS: usize = 100;
+const MAX_ORDER_RECORDS: usize = 100;
 const LEVERAGE_EPSILON: f64 = 1e-6;
 
 #[derive(Clone, Debug)]
@@ -111,6 +113,8 @@ struct TradeState {
     order_tx: Option<mpsc::Sender<TradingCommand>>,
     logs: Vec<TradeLogEntry>,
     log_view_height: u16,
+    position_view_height: u16,
+    order_view_height: u16,
     positions: Vec<PositionInfo>,
     open_orders: Vec<PendingOrderInfo>,
     focus: TradeFocus,
@@ -132,6 +136,8 @@ impl TradeState {
             order_tx,
             logs: Vec::new(),
             log_view_height: 0,
+            position_view_height: 0,
+            order_view_height: 0,
             positions: Vec::new(),
             open_orders: Vec::new(),
             focus: TradeFocus::Instruments,
@@ -151,18 +157,20 @@ impl TradeState {
     }
 
     fn ensure_position_selection(&mut self) {
-        if self.positions.is_empty() {
+        let len = self.positions.len().min(MAX_POSITION_RECORDS);
+        if len == 0 {
             self.selected_position_idx = 0;
-        } else if self.selected_position_idx >= self.positions.len() {
-            self.selected_position_idx = self.positions.len().saturating_sub(1);
+        } else if self.selected_position_idx >= len {
+            self.selected_position_idx = len.saturating_sub(1);
         }
     }
 
     fn ensure_order_selection(&mut self) {
-        if self.open_orders.is_empty() {
+        let len = self.open_orders.len().min(MAX_ORDER_RECORDS);
+        if len == 0 {
             self.selected_order_idx = 0;
-        } else if self.selected_order_idx >= self.open_orders.len() {
-            self.selected_order_idx = self.open_orders.len().saturating_sub(1);
+        } else if self.selected_order_idx >= len {
+            self.selected_order_idx = len.saturating_sub(1);
         }
     }
 
@@ -200,12 +208,13 @@ impl TradeState {
     }
 
     fn move_positions(&mut self, delta: isize) {
-        if self.positions.is_empty() {
+        let len = self.positions.len().min(MAX_POSITION_RECORDS);
+        if len == 0 {
             self.selected_position_idx = 0;
             return;
         }
-        let len = self.positions.len() as isize;
-        let current = self.selected_position_idx.min(self.positions.len() - 1) as isize;
+        let len = len as isize;
+        let current = self.selected_position_idx.min((len - 1) as usize) as isize;
         let mut next = current + delta;
         if next < 0 {
             next = 0;
@@ -216,12 +225,13 @@ impl TradeState {
     }
 
     fn move_orders(&mut self, delta: isize) {
-        if self.open_orders.is_empty() {
+        let len = self.open_orders.len().min(MAX_ORDER_RECORDS);
+        if len == 0 {
             self.selected_order_idx = 0;
             return;
         }
-        let len = self.open_orders.len() as isize;
-        let current = self.selected_order_idx.min(self.open_orders.len() - 1) as isize;
+        let len = len as isize;
+        let current = self.selected_order_idx.min((len - 1) as usize) as isize;
         let mut next = current + delta;
         if next < 0 {
             next = 0;
@@ -298,23 +308,21 @@ impl TradeState {
     }
 
     fn selected_position(&self) -> Option<&PositionInfo> {
-        if self.positions.is_empty() {
+        let len = self.positions.len().min(MAX_POSITION_RECORDS);
+        if len == 0 {
             None
         } else {
-            let idx = self
-                .selected_position_idx
-                .min(self.positions.len().saturating_sub(1));
+            let idx = self.selected_position_idx.min(len.saturating_sub(1));
             self.positions.get(idx)
         }
     }
 
     fn selected_order(&self) -> Option<&PendingOrderInfo> {
-        if self.open_orders.is_empty() {
+        let len = self.open_orders.len().min(MAX_ORDER_RECORDS);
+        if len == 0 {
             None
         } else {
-            let idx = self
-                .selected_order_idx
-                .min(self.open_orders.len().saturating_sub(1));
+            let idx = self.selected_order_idx.min(len.saturating_sub(1));
             self.open_orders.get(idx)
         }
     }
@@ -394,6 +402,78 @@ impl TradeState {
 
     fn set_log_view_height(&mut self, view_height: u16) {
         self.log_view_height = view_height.max(1);
+    }
+
+    fn set_position_view_height(&mut self, view_height: u16) {
+        self.position_view_height = view_height.max(1);
+    }
+
+    fn set_order_view_height(&mut self, view_height: u16) {
+        self.order_view_height = view_height.max(1);
+    }
+
+    fn page_scroll_positions(&mut self, pages: isize) {
+        if pages == 0 {
+            return;
+        }
+        let len = self.positions.len().min(MAX_POSITION_RECORDS);
+        if len == 0 {
+            return;
+        }
+        let page = self.position_view_height.max(1) as isize;
+        let len = len as isize;
+        let mut next = self.selected_position_idx as isize + page * pages;
+        if next < 0 {
+            next = 0;
+        } else if next >= len {
+            next = len - 1;
+        }
+        self.selected_position_idx = next as usize;
+    }
+
+    fn page_scroll_orders(&mut self, pages: isize) {
+        if pages == 0 {
+            return;
+        }
+        let len = self.open_orders.len().min(MAX_ORDER_RECORDS);
+        if len == 0 {
+            return;
+        }
+        let page = self.order_view_height.max(1) as isize;
+        let len = len as isize;
+        let mut next = self.selected_order_idx as isize + page * pages;
+        if next < 0 {
+            next = 0;
+        } else if next >= len {
+            next = len - 1;
+        }
+        self.selected_order_idx = next as usize;
+    }
+
+    fn scroll_positions_to_start(&mut self) {
+        if !self.positions.is_empty() {
+            self.selected_position_idx = 0;
+        }
+    }
+
+    fn scroll_positions_to_end(&mut self) {
+        let len = self.positions.len().min(MAX_POSITION_RECORDS);
+        if len > 0 {
+            self.selected_position_idx = len - 1;
+        }
+    }
+
+    fn scroll_orders_to_start(&mut self) {
+        if !self.open_orders.is_empty() {
+            self.selected_order_idx = 0;
+        }
+    }
+
+    fn scroll_orders_to_end(&mut self) {
+        let len = self.open_orders.len().min(MAX_ORDER_RECORDS);
+        if len > 0 {
+            self.selected_order_idx = len - 1;
+        }
     }
 
     fn leverage_for_event(&self, event: &TradeEvent) -> Option<f64> {
@@ -832,7 +912,7 @@ impl TuiApp {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(header_height),
-                    Constraint::Length(12),
+                    Constraint::Length(14),
                     Constraint::Min(4),
                 ])
                 .split(area);
@@ -849,7 +929,7 @@ impl TuiApp {
         }
     }
 
-    fn render_account_snapshot(&self, frame: &mut Frame, area: Rect) {
+    fn render_account_snapshot(&mut self, frame: &mut Frame, area: Rect) {
         if area.height < 3 || area.width < 10 {
             return;
         }
@@ -881,18 +961,28 @@ impl TuiApp {
         }
     }
 
-    fn render_positions_panel(&self, frame: &mut Frame, area: Rect) {
+    fn render_positions_panel(&mut self, frame: &mut Frame, area: Rect) {
         let block = self.section_block("Positions", TradeFocus::Positions);
         if area.height < 3 {
             frame.render_widget(block, area);
+            self.trade.set_position_view_height(1);
             return;
         }
         let mut lines = Vec::new();
-        let visible = area.height.saturating_sub(2) as usize;
-        if self.trade.positions.is_empty() || visible == 0 {
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let list_visible = inner_height.saturating_sub(1);
+        let page_height = list_visible.max(1);
+        self.trade
+            .set_position_view_height(page_height.min(u16::MAX as usize) as u16);
+        let total = self.trade.positions.len();
+        let display_len = total.min(MAX_POSITION_RECORDS);
+        if display_len == 0 {
             lines.push(Line::from("无持仓"));
+        } else if list_visible == 0 {
+            lines.push(Line::from("窗口高度不足，无法显示持仓"));
         } else {
             lines.push(Line::from(format_columns(&[
+                ("序号", ColumnAlign::Right, 4),
                 ("合约", ColumnAlign::Left, 14),
                 ("方向", ColumnAlign::Left, 4),
                 ("数量", ColumnAlign::Right, 12),
@@ -901,13 +991,13 @@ impl TuiApp {
                 ("盈亏", ColumnAlign::Right, 12),
                 ("盈亏%", ColumnAlign::Right, 10),
             ])));
-            let selected_idx =
-                clamp_index(self.trade.selected_position_idx, self.trade.positions.len());
-            let (start, end) = visible_range(self.trade.positions.len(), visible, selected_idx);
+            let selected_idx = clamp_index(self.trade.selected_position_idx, display_len);
+            let (start, end) = visible_range(display_len, list_visible, selected_idx);
             for (idx, position) in self
                 .trade
                 .positions
                 .iter()
+                .take(display_len)
                 .enumerate()
                 .skip(start)
                 .take(end.saturating_sub(start))
@@ -927,9 +1017,11 @@ impl TuiApp {
                     .position_pnl_ratio(position)
                     .map(Self::format_pnl_ratio)
                     .unwrap_or_else(|| "--".to_string());
+                let ordinal_label = format!("{}", idx + 1);
                 let row = format_columns(&[
+                    (ordinal_label.as_str(), ColumnAlign::Right, 4),
                     (position.inst_id.as_str(), ColumnAlign::Left, 14),
-                    (side_label, ColumnAlign::Left, 6),
+                    (side_label, ColumnAlign::Left, 4),
                     (size_label.as_str(), ColumnAlign::Right, 12),
                     (avg_label.as_str(), ColumnAlign::Right, 12),
                     (lever_label.as_str(), ColumnAlign::Right, 8),
@@ -978,18 +1070,28 @@ impl TuiApp {
         }
     }
 
-    fn render_open_orders_panel(&self, frame: &mut Frame, area: Rect) {
+    fn render_open_orders_panel(&mut self, frame: &mut Frame, area: Rect) {
         let block = self.section_block("Open Orders", TradeFocus::Orders);
         if area.height < 3 {
             frame.render_widget(block, area);
+            self.trade.set_order_view_height(1);
             return;
         }
         let mut lines = Vec::new();
-        let visible = area.height.saturating_sub(2) as usize;
-        if self.trade.open_orders.is_empty() || visible == 0 {
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let list_visible = inner_height.saturating_sub(1);
+        let page_height = list_visible.max(1);
+        self.trade
+            .set_order_view_height(page_height.min(u16::MAX as usize) as u16);
+        let total = self.trade.open_orders.len();
+        let display_len = total.min(MAX_ORDER_RECORDS);
+        if display_len == 0 {
             lines.push(Line::from("无挂单"));
+        } else if list_visible == 0 {
+            lines.push(Line::from("窗口高度不足，无法显示挂单"));
         } else {
             lines.push(Line::from(format_columns(&[
+                ("序号", ColumnAlign::Right, 4),
                 ("合约", ColumnAlign::Left, 14),
                 ("方向", ColumnAlign::Left, 10),
                 ("类型", ColumnAlign::Left, 10),
@@ -999,13 +1101,13 @@ impl TuiApp {
                 ("状态", ColumnAlign::Left, 8),
                 ("订单", ColumnAlign::Left, 12),
             ])));
-            let selected_idx =
-                clamp_index(self.trade.selected_order_idx, self.trade.open_orders.len());
-            let (start, end) = visible_range(self.trade.open_orders.len(), visible, selected_idx);
+            let selected_idx = clamp_index(self.trade.selected_order_idx, display_len);
+            let (start, end) = visible_range(display_len, list_visible, selected_idx);
             for (idx, order) in self
                 .trade
                 .open_orders
                 .iter()
+                .take(display_len)
                 .enumerate()
                 .skip(start)
                 .take(end.saturating_sub(start))
@@ -1019,7 +1121,9 @@ impl TuiApp {
                 let size_label = Self::format_contract_size(order.size);
                 let ord_label = Self::short_order_id(&order.ord_id);
                 let lever_label = Self::leverage_label(order.lever);
+                let ordinal_label = format!("{}", idx + 1);
                 let row = format_columns(&[
+                    (ordinal_label.as_str(), ColumnAlign::Right, 4),
                     (order.inst_id.as_str(), ColumnAlign::Left, 14),
                     (side_label.as_str(), ColumnAlign::Left, 10),
                     (intent_label, ColumnAlign::Left, 10),
@@ -1139,6 +1243,7 @@ impl TuiApp {
             lines.push(Line::from("窗口高度不足，无法显示委托记录"));
         } else {
             lines.push(Line::from(format_columns(&[
+                ("序号", ColumnAlign::Right, 5),
                 ("时间", ColumnAlign::Left, 8),
                 ("类型", ColumnAlign::Left, 4),
                 ("合约", ColumnAlign::Left, 14),
@@ -1153,16 +1258,19 @@ impl TuiApp {
             let selected_display_idx = self.trade.selected_log_display_index();
             let (start, end) = visible_range(log_count, list_visible, selected_display_idx);
             let mut display_idx = start;
-            for entry in self
+            for (offset, entry) in self
                 .trade
                 .logs
                 .iter()
                 .rev()
+                .enumerate()
                 .skip(start)
                 .take(end.saturating_sub(start))
             {
                 let highlight = log_focus && display_idx == selected_display_idx;
-                lines.push(self.render_log_row(entry, highlight));
+                let ordinal = log_count.saturating_sub(offset);
+                let ordinal = if ordinal == 0 { 1 } else { ordinal };
+                lines.push(self.render_log_row(entry, highlight, ordinal));
                 display_idx += 1;
             }
         }
@@ -1180,8 +1288,13 @@ impl TuiApp {
         frame.render_widget(paragraph, area);
     }
 
-    fn render_log_row(&self, entry: &TradeLogEntry, highlight: bool) -> Line<'static> {
-        let columns = self.log_row_columns(entry);
+    fn render_log_row(
+        &self,
+        entry: &TradeLogEntry,
+        highlight: bool,
+        ordinal: usize,
+    ) -> Line<'static> {
+        let columns = self.log_row_columns(entry, ordinal);
         let column_count = columns.len();
         let mut spans = Vec::new();
         for (idx, (value, align, width, color)) in columns.into_iter().enumerate() {
@@ -1210,9 +1323,11 @@ impl TuiApp {
     fn log_row_columns(
         &self,
         entry: &TradeLogEntry,
+        ordinal: usize,
     ) -> Vec<(String, ColumnAlign, usize, Option<Color>)> {
         let time = entry.timestamp.format("%H:%M:%S").to_string();
         let leverage_label = Self::leverage_label(entry.leverage);
+        let ordinal_label = ordinal.to_string();
         match &entry.event {
             TradeEvent::Order(response) => {
                 let side_label = Self::side_short_label(response.side).to_string();
@@ -1220,6 +1335,7 @@ impl TuiApp {
                 let price_label = self.format_price_for(&response.inst_id, response.price);
                 let status_color = Self::status_color(response.success);
                 vec![
+                    (ordinal_label, ColumnAlign::Right, 5, None),
                     (time, ColumnAlign::Left, 8, None),
                     ("委托".to_string(), ColumnAlign::Left, 4, None),
                     (response.inst_id.clone(), ColumnAlign::Left, 14, None),
@@ -1245,6 +1361,7 @@ impl TuiApp {
                 let ord_short = Self::short_order_id(&cancel.ord_id);
                 let status_color = Self::status_color(cancel.success);
                 vec![
+                    (ordinal_label, ColumnAlign::Right, 5, None),
                     (time, ColumnAlign::Left, 8, None),
                     ("撤单".to_string(), ColumnAlign::Left, 4, None),
                     (cancel.inst_id.clone(), ColumnAlign::Left, 14, None),
@@ -1998,26 +2115,30 @@ impl TuiApp {
                     self.trade.toggle_log_detail();
                 }
             }
-            KeyCode::PageUp => {
-                if self.trade.focus == TradeFocus::Logs {
-                    self.trade.page_scroll_logs(-1);
-                }
-            }
-            KeyCode::PageDown => {
-                if self.trade.focus == TradeFocus::Logs {
-                    self.trade.page_scroll_logs(1);
-                }
-            }
-            KeyCode::Home => {
-                if self.trade.focus == TradeFocus::Logs {
-                    self.trade.scroll_logs_to_start();
-                }
-            }
-            KeyCode::End => {
-                if self.trade.focus == TradeFocus::Logs {
-                    self.trade.scroll_logs_to_end();
-                }
-            }
+            KeyCode::PageUp => match self.trade.focus {
+                TradeFocus::Positions => self.trade.page_scroll_positions(-1),
+                TradeFocus::Orders => self.trade.page_scroll_orders(-1),
+                TradeFocus::Logs => self.trade.page_scroll_logs(-1),
+                TradeFocus::Instruments => {}
+            },
+            KeyCode::PageDown => match self.trade.focus {
+                TradeFocus::Positions => self.trade.page_scroll_positions(1),
+                TradeFocus::Orders => self.trade.page_scroll_orders(1),
+                TradeFocus::Logs => self.trade.page_scroll_logs(1),
+                TradeFocus::Instruments => {}
+            },
+            KeyCode::Home => match self.trade.focus {
+                TradeFocus::Positions => self.trade.scroll_positions_to_start(),
+                TradeFocus::Orders => self.trade.scroll_orders_to_start(),
+                TradeFocus::Logs => self.trade.scroll_logs_to_start(),
+                TradeFocus::Instruments => {}
+            },
+            KeyCode::End => match self.trade.focus {
+                TradeFocus::Positions => self.trade.scroll_positions_to_end(),
+                TradeFocus::Orders => self.trade.scroll_orders_to_end(),
+                TradeFocus::Logs => self.trade.scroll_logs_to_end(),
+                TradeFocus::Instruments => {}
+            },
             _ => {}
         }
     }
