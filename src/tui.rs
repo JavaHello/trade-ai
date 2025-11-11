@@ -35,6 +35,7 @@ const COLOR_PALETTE: [Color; 8] = [
     Color::LightCyan,
 ];
 const EMPTY_SERIES: &[(f64, f64)] = &[];
+const MAX_TRADE_LOGS: usize = 1000;
 
 #[derive(Clone, Debug)]
 struct AxisInfo {
@@ -70,6 +71,7 @@ enum TradeFocus {
     Instruments,
     Positions,
     Orders,
+    Logs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +105,9 @@ struct TradeState {
     input: Option<OrderInputState>,
     order_tx: Option<mpsc::Sender<TradingCommand>>,
     logs: Vec<TradeLogEntry>,
+    log_scroll: u16,
+    log_max_scroll: u16,
+    log_view_height: u16,
     positions: Vec<PositionInfo>,
     open_orders: Vec<PendingOrderInfo>,
     focus: TradeFocus,
@@ -121,6 +126,9 @@ impl TradeState {
             input: None,
             order_tx,
             logs: Vec::new(),
+            log_scroll: 0,
+            log_max_scroll: 0,
+            log_view_height: 0,
             positions: Vec::new(),
             open_orders: Vec::new(),
             focus: TradeFocus::Instruments,
@@ -159,6 +167,7 @@ impl TradeState {
             TradeFocus::Instruments => self.move_instruments(inst_ids, delta),
             TradeFocus::Positions => self.move_positions(delta),
             TradeFocus::Orders => self.move_orders(delta),
+            TradeFocus::Logs => self.scroll_logs(delta),
         }
     }
 
@@ -237,10 +246,9 @@ impl TradeState {
     }
 
     fn push_log(&mut self, entry: TradeLogEntry) {
-        const MAX_LOGS: usize = 64;
         self.logs.push(entry);
-        if self.logs.len() > MAX_LOGS {
-            let overflow = self.logs.len() - MAX_LOGS;
+        if self.logs.len() > MAX_TRADE_LOGS {
+            let overflow = self.logs.len() - MAX_TRADE_LOGS;
             self.logs.drain(0..overflow);
         }
     }
@@ -290,15 +298,18 @@ impl TradeState {
         self.focus = match (self.focus, reverse) {
             (TradeFocus::Instruments, false) => TradeFocus::Positions,
             (TradeFocus::Positions, false) => TradeFocus::Orders,
-            (TradeFocus::Orders, false) => TradeFocus::Instruments,
-            (TradeFocus::Instruments, true) => TradeFocus::Orders,
+            (TradeFocus::Orders, false) => TradeFocus::Logs,
+            (TradeFocus::Logs, false) => TradeFocus::Instruments,
+            (TradeFocus::Instruments, true) => TradeFocus::Logs,
             (TradeFocus::Positions, true) => TradeFocus::Instruments,
             (TradeFocus::Orders, true) => TradeFocus::Positions,
+            (TradeFocus::Logs, true) => TradeFocus::Orders,
         };
         match self.focus {
             TradeFocus::Instruments => {}
             TradeFocus::Positions => self.ensure_position_selection(),
             TradeFocus::Orders => self.ensure_order_selection(),
+            TradeFocus::Logs => {}
         }
     }
 
@@ -307,6 +318,7 @@ impl TradeState {
             TradeFocus::Instruments => "合约",
             TradeFocus::Positions => "持仓",
             TradeFocus::Orders => "挂单",
+            TradeFocus::Logs => "委托记录",
         }
     }
 
@@ -315,6 +327,47 @@ impl TradeState {
         self.open_orders.retain(|order| order.ord_id.ne(ord_id));
         if before != self.open_orders.len() {
             self.ensure_order_selection();
+        }
+    }
+
+    fn scroll_logs(&mut self, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+        let current = self.log_scroll as isize;
+        let mut next = current + delta;
+        if next < 0 {
+            next = 0;
+        }
+        let max = self.log_max_scroll as isize;
+        if next > max {
+            next = max;
+        }
+        self.log_scroll = next as u16;
+    }
+
+    fn page_scroll_logs(&mut self, pages: isize) {
+        if pages == 0 {
+            return;
+        }
+        let height = self.log_view_height.max(1) as isize;
+        let delta = height * pages;
+        self.scroll_logs(delta);
+    }
+
+    fn scroll_logs_to_start(&mut self) {
+        self.log_scroll = 0;
+    }
+
+    fn scroll_logs_to_end(&mut self) {
+        self.log_scroll = self.log_max_scroll;
+    }
+
+    fn set_log_view_metrics(&mut self, view_height: u16, max_scroll: u16) {
+        self.log_view_height = view_height.max(1);
+        self.log_max_scroll = max_scroll;
+        if self.log_scroll > self.log_max_scroll {
+            self.log_scroll = self.log_max_scroll;
         }
     }
 }
@@ -572,7 +625,7 @@ impl TuiApp {
         self.trade.ensure_selection(&self.inst_ids);
         self.update_window();
     }
-    fn render(&self, frame: &mut Frame) {
+    fn render(&mut self, frame: &mut Frame) {
         match self.view_mode {
             ViewMode::Chart => self.render_chart_view(frame),
             ViewMode::Trade => self.render_trade_view(frame),
@@ -596,7 +649,7 @@ impl TuiApp {
         }
     }
 
-    fn render_trade_view(&self, frame: &mut Frame) {
+    fn render_trade_view(&mut self, frame: &mut Frame) {
         let area = frame.area();
         let has_status = self.status_message.is_some() && area.height >= 6;
         let (main_area, status_area) = if has_status {
@@ -619,7 +672,7 @@ impl TuiApp {
         }
     }
 
-    fn render_trade_panel(&self, frame: &mut Frame, area: Rect) {
+    fn render_trade_panel(&mut self, frame: &mut Frame, area: Rect) {
         if area.height < 4 || area.width < 20 {
             return;
         }
@@ -843,9 +896,10 @@ impl TuiApp {
         let mut instruction_lines = Vec::new();
         if self.trade.trading_enabled() {
             let (pos_cnt, ord_cnt) = self.trade.snapshot_counts();
+            let log_cnt = self.trade.logs.len();
             instruction_lines.push(format!(
-                "Tab 切换 · Shift+Tab 返回 · ↑↓ 浏览 · 持仓 {} · 挂单 {} · t 返回图表",
-                pos_cnt, ord_cnt
+                "Tab 切换 · Shift+Tab 返回 · ↑↓/j k 浏览/滚动 · 持仓 {} · 挂单 {} · 委托 {} · t 返回图表",
+                pos_cnt, ord_cnt, log_cnt
             ));
             if let Some(focus_hint) = self.focus_shortcut_hint() {
                 instruction_lines.push(focus_hint);
@@ -868,110 +922,137 @@ impl TuiApp {
             return None;
         }
         let hint = match self.trade.focus {
-            TradeFocus::Instruments => "焦点 合约：↑↓ 选择合约 · b 买入 · s 卖出",
-            TradeFocus::Positions => "焦点 持仓：↑↓ 选择持仓 · p 止盈 · l 止损",
-            TradeFocus::Orders => "焦点 挂单：↑↓ 选择挂单 · c 撤单 · r 改单",
+            TradeFocus::Instruments => "焦点 合约：↑↓/j k 选择合约 · b 买入 · s 卖出",
+            TradeFocus::Positions => "焦点 持仓：↑↓/j k 选择持仓 · p 止盈 · l 止损",
+            TradeFocus::Orders => "焦点 挂单：↑↓/j k 选择挂单 · c 撤单 · r 改单",
+            TradeFocus::Logs => {
+                "焦点 委托记录：↑↓/j k 滚动 · PageUp/PageDown 翻页 · Home/End 顶/底"
+            }
         };
         Some(hint.to_string())
     }
 
-    fn render_trade_activity(&self, frame: &mut Frame, area: Rect) {
-        let mut lines = Vec::new();
-        if self.trade.logs.is_empty() {
-            if self.trade.trading_enabled() {
-                lines.push(Line::from("暂无委托，按 b/s 提交订单"));
-            } else {
-                lines.push(Line::from("未配置 OKX API，无法下单"));
-            }
-        } else {
-            lines.push(Line::from("时间     类型  明细"));
-            for entry in self.trade.logs.iter().rev().take(12) {
-                let time = entry.timestamp.format("%H:%M:%S").to_string();
-                match &entry.event {
-                    TradeEvent::Order(response) => {
-                        let side_short = Self::side_short_label(response.side);
-                        let side_color = Self::side_color(response.side);
-                        let status_color = Self::status_color(response.success);
-                        let status_label = Self::status_label(response.success);
-                        let size_label = Self::format_contract_size(response.size);
-                        lines.push(Line::from(vec![
-                            Span::raw(format!("{time} ")),
-                            Span::styled(
-                                "委托 ",
-                                Style::default()
-                                    .fg(Color::LightBlue)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(format!("{:<10}", response.inst_id)),
-                            Span::styled(
-                                format!("{:<2}", side_short),
-                                Style::default().fg(side_color).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(" "),
-                            Span::raw(format!("{:>10}", size_label)),
-                            Span::raw(" @ "),
-                            Span::raw(self.format_price_for(&response.inst_id, response.price)),
-                            Span::raw(" "),
-                            Span::styled(
-                                format!("[{}]", Self::operator_label(&response.operator)),
-                                Style::default().fg(Self::operator_color(&response.operator)),
-                            ),
-                            Span::raw(" "),
-                            Span::styled(status_label, Style::default().fg(status_color)),
-                        ]));
-                        if let Some(ord_id) = &response.order_id {
-                            lines.push(Line::from(vec![
-                                Span::raw("订单ID "),
-                                Span::styled(ord_id.as_str(), Style::default().fg(Color::DarkGray)),
-                            ]));
-                        }
-                        if !response.message.is_empty() {
-                            lines.push(Line::from(Span::styled(
-                                Self::truncate_message(&response.message, 80),
-                                Style::default().fg(status_color),
-                            )));
-                        }
-                    }
-                    TradeEvent::Cancel(cancel) => {
-                        let status_color = Self::status_color(cancel.success);
-                        let status_label = Self::status_label(cancel.success);
-                        lines.push(Line::from(vec![
-                            Span::raw(format!("{time} ")),
-                            Span::styled(
-                                "撤单 ",
-                                Style::default()
-                                    .fg(Color::LightYellow)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(format!("{:<10}", cancel.inst_id)),
-                            Span::raw(" "),
-                            Span::styled(
-                                Self::short_order_id(&cancel.ord_id),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                            Span::raw(" "),
-                            Span::styled(
-                                format!("[{}]", Self::operator_label(&cancel.operator)),
-                                Style::default().fg(Self::operator_color(&cancel.operator)),
-                            ),
-                            Span::raw(" "),
-                            Span::styled(status_label, Style::default().fg(status_color)),
-                        ]));
-                        if !cancel.message.is_empty() {
-                            lines.push(Line::from(Span::styled(
-                                Self::truncate_message(&cancel.message, 80),
-                                Style::default().fg(status_color),
-                            )));
-                        }
-                    }
+    fn render_trade_activity(&mut self, frame: &mut Frame, area: Rect) {
+        let log_count = self.trade.logs.len();
+        let log_entries: Vec<TradeLogEntry> = self.trade.logs.iter().rev().cloned().collect();
+        let lines = {
+            let mut lines = Vec::new();
+            if self.trade.logs.is_empty() {
+                if self.trade.trading_enabled() {
+                    lines.push(Line::from("暂无委托，按 b/s 提交订单"));
+                } else {
+                    lines.push(Line::from("未配置 OKX API，无法下单"));
                 }
-                lines.push(Line::from(" "));
+            } else {
+                lines.push(Line::from("时间     类型  明细"));
+                for entry in log_entries.iter() {
+                    let time = entry.timestamp.format("%H:%M:%S").to_string();
+                    match &entry.event {
+                        TradeEvent::Order(response) => {
+                            let side_short = Self::side_short_label(response.side);
+                            let side_color = Self::side_color(response.side);
+                            let status_color = Self::status_color(response.success);
+                            let status_label = Self::status_label(response.success);
+                            let size_label = Self::format_contract_size(response.size);
+                            lines.push(Line::from(vec![
+                                Span::raw(format!("{time} ")),
+                                Span::styled(
+                                    "委托 ",
+                                    Style::default()
+                                        .fg(Color::LightBlue)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(format!("{:<10}", response.inst_id)),
+                                Span::styled(
+                                    format!("{:<2}", side_short),
+                                    Style::default().fg(side_color).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(" "),
+                                Span::raw(format!("{:>10}", size_label)),
+                                Span::raw(" @ "),
+                                Span::raw(self.format_price_for(&response.inst_id, response.price)),
+                                Span::raw(" "),
+                                Span::styled(
+                                    format!("[{}]", Self::operator_label(&response.operator)),
+                                    Style::default().fg(Self::operator_color(&response.operator)),
+                                ),
+                                Span::raw(" "),
+                                Span::styled(status_label, Style::default().fg(status_color)),
+                            ]));
+                            if let Some(ord_id) = &response.order_id {
+                                lines.push(Line::from(vec![
+                                    Span::raw("订单ID "),
+                                    Span::styled(
+                                        ord_id.as_str(),
+                                        Style::default().fg(Color::DarkGray),
+                                    ),
+                                ]));
+                            }
+                            if !response.message.is_empty() {
+                                lines.push(Line::from(Span::styled(
+                                    Self::truncate_message(&response.message, 80),
+                                    Style::default().fg(status_color),
+                                )));
+                            }
+                        }
+                        TradeEvent::Cancel(cancel) => {
+                            let status_color = Self::status_color(cancel.success);
+                            let status_label = Self::status_label(cancel.success);
+                            lines.push(Line::from(vec![
+                                Span::raw(format!("{time} ")),
+                                Span::styled(
+                                    "撤单 ",
+                                    Style::default()
+                                        .fg(Color::LightYellow)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(format!("{:<10}", cancel.inst_id)),
+                                Span::raw(" "),
+                                Span::styled(
+                                    Self::short_order_id(&cancel.ord_id),
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                                Span::raw(" "),
+                                Span::styled(
+                                    format!("[{}]", Self::operator_label(&cancel.operator)),
+                                    Style::default().fg(Self::operator_color(&cancel.operator)),
+                                ),
+                                Span::raw(" "),
+                                Span::styled(status_label, Style::default().fg(status_color)),
+                            ]));
+                            if !cancel.message.is_empty() {
+                                lines.push(Line::from(Span::styled(
+                                    Self::truncate_message(&cancel.message, 80),
+                                    Style::default().fg(status_color),
+                                )));
+                            }
+                        }
+                    }
+                    lines.push(Line::from(" "));
+                }
             }
+            lines
+        };
+        let title = format!("委托记录 {log_count}/{MAX_TRADE_LOGS}");
+        let mut block = Block::bordered().title(title);
+        if self.trade.focus == TradeFocus::Logs {
+            block = block.border_style(Style::default().fg(Color::LightMagenta));
         }
-        let block = Block::bordered().title("委托记录");
+        let mut text_height = area.height.saturating_sub(2);
+        if text_height == 0 {
+            text_height = 1;
+        }
+        let total_lines = lines.len();
+        let max_scroll = total_lines.saturating_sub(text_height as usize);
+        let max_scroll_u16 = max_scroll.min(u16::MAX as usize) as u16;
+        let view_height_u16 = text_height.min(u16::MAX);
+        self.trade
+            .set_log_view_metrics(view_height_u16, max_scroll_u16);
+        let scroll = self.trade.log_scroll;
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
-            .block(block);
+            .block(block)
+            .scroll((scroll, 0));
         frame.render_widget(paragraph, area);
     }
 
@@ -1559,6 +1640,12 @@ impl TuiApp {
             KeyCode::Down => {
                 self.trade.move_focus(&self.inst_ids, 1);
             }
+            KeyCode::Char('j') => {
+                self.trade.move_focus(&self.inst_ids, 1);
+            }
+            KeyCode::Char('k') => {
+                self.trade.move_focus(&self.inst_ids, -1);
+            }
             KeyCode::Char('b') | KeyCode::Char('B') => {
                 self.start_order_entry(TradeSide::Buy);
             }
@@ -1583,6 +1670,26 @@ impl TuiApp {
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 if self.trade.focus == TradeFocus::Orders {
                     self.start_order_replace();
+                }
+            }
+            KeyCode::PageUp => {
+                if self.trade.focus == TradeFocus::Logs {
+                    self.trade.page_scroll_logs(-1);
+                }
+            }
+            KeyCode::PageDown => {
+                if self.trade.focus == TradeFocus::Logs {
+                    self.trade.page_scroll_logs(1);
+                }
+            }
+            KeyCode::Home => {
+                if self.trade.focus == TradeFocus::Logs {
+                    self.trade.scroll_logs_to_start();
+                }
+            }
+            KeyCode::End => {
+                if self.trade.focus == TradeFocus::Logs {
+                    self.trade.scroll_logs_to_end();
                 }
             }
             _ => {}
