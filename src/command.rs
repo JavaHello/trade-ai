@@ -39,6 +39,7 @@ pub struct TradeRequest {
     pub size: f64,
     pub pos_side: Option<String>,
     pub reduce_only: bool,
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,4 +113,5 @@ pub struct PendingOrderInfo {
     pub size: f64,
     pub state: String,
     pub reduce_only: bool,
+    pub tag: Option<String>,
 }

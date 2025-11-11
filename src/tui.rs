@@ -75,6 +75,7 @@ enum OrderIntent {
     Manual,
     TakeProfit,
     StopLoss,
+    Modify,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +88,9 @@ struct OrderInputState {
     error: Option<String>,
     pos_side: Option<String>,
     intent: OrderIntent,
+    reduce_only: bool,
+    tag: Option<String>,
+    replace_order_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -317,6 +321,7 @@ impl OrderIntent {
             OrderIntent::Manual => "",
             OrderIntent::TakeProfit => "止盈 ",
             OrderIntent::StopLoss => "止损 ",
+            OrderIntent::Modify => "修改 ",
         }
     }
 
@@ -325,6 +330,7 @@ impl OrderIntent {
             OrderIntent::Manual => "下单",
             OrderIntent::TakeProfit => "止盈",
             OrderIntent::StopLoss => "止损",
+            OrderIntent::Modify => "改单",
         }
     }
 }
@@ -682,7 +688,7 @@ impl TuiApp {
                 .take(end.saturating_sub(start))
             {
                 let side_label = Self::order_side_label(&order.side, order.pos_side.as_deref());
-                let intent_label = Self::order_intent_label(order.reduce_only);
+                let intent_label = self.order_intent_label(order);
                 let price_label = order
                     .price
                     .map(|value| self.format_price_for(&order.inst_id, value))
@@ -724,7 +730,7 @@ impl TuiApp {
         let instructions = if self.trade.trading_enabled() {
             let (pos_cnt, ord_cnt) = self.trade.snapshot_counts();
             format!(
-                "焦点 {} · Tab 切换 · ↑↓ 浏览 · b 买入 · s 卖出 · p 止盈 · l 止损 · c 撤单 · 持仓 {} · 挂单 {} · t 返回图表",
+                "焦点 {} · Tab 切换 · ↑↓ 浏览 · b 买入 · s 卖出 · p 止盈 · l 止损 · c 撤单 · r 改单 · 持仓 {} · 挂单 {} · t 返回图表",
                 focus_label, pos_cnt, ord_cnt
             )
         } else {
@@ -865,6 +871,16 @@ impl TuiApp {
         }
     }
 
+    fn parse_order_side(value: &str) -> Option<TradeSide> {
+        if value.eq_ignore_ascii_case("buy") {
+            Some(TradeSide::Buy)
+        } else if value.eq_ignore_ascii_case("sell") {
+            Some(TradeSide::Sell)
+        } else {
+            None
+        }
+    }
+
     fn side_short_label(side: TradeSide) -> &'static str {
         match side {
             TradeSide::Buy => "买",
@@ -914,11 +930,92 @@ impl TuiApp {
         }
     }
 
-    fn order_intent_label(reduce_only: bool) -> &'static str {
-        if reduce_only {
-            "止盈/止损"
+    fn order_intent_label(&self, order: &PendingOrderInfo) -> &'static str {
+        if let Some(label) = Self::tagged_order_intent(order) {
+            return label;
+        }
+        if order.reduce_only {
+            self.heuristic_reduce_only_intent(order)
+                .unwrap_or("止盈/止损")
         } else {
             "限价开仓"
+        }
+    }
+
+    fn tagged_order_intent(order: &PendingOrderInfo) -> Option<&'static str> {
+        let tag = order.tag.as_deref()?.trim();
+        if tag.is_empty() {
+            return None;
+        }
+        let lowered = tag.to_ascii_lowercase();
+        match lowered.as_str() {
+            "tp" | "takeprofit" | "take_profit" | "take-profit" => Some("止盈"),
+            "sl" | "stoploss" | "stop_loss" | "stop-loss" => Some("止损"),
+            _ => None,
+        }
+    }
+
+    fn heuristic_reduce_only_intent(&self, order: &PendingOrderInfo) -> Option<&'static str> {
+        let price = order.price?;
+        let position = self.position_for_order(order)?;
+        let avg = position.avg_px?;
+        let side = order.side.to_ascii_lowercase();
+        if side == "sell" {
+            if price >= avg {
+                Some("止盈")
+            } else {
+                Some("止损")
+            }
+        } else if side == "buy" {
+            if price <= avg {
+                Some("止盈")
+            } else {
+                Some("止损")
+            }
+        } else {
+            None
+        }
+    }
+
+    fn position_for_order(&self, order: &PendingOrderInfo) -> Option<&PositionInfo> {
+        self.trade
+            .positions
+            .iter()
+            .find(|position| Self::position_matches_order(order, position))
+    }
+
+    fn position_matches_order(order: &PendingOrderInfo, position: &PositionInfo) -> bool {
+        if position.inst_id != order.inst_id {
+            return false;
+        }
+        match (&order.pos_side, &position.pos_side) {
+            (Some(ord_side), Some(pos_side)) => ord_side.eq_ignore_ascii_case(pos_side.as_str()),
+            (Some(ord_side), None) => Self::side_matches_size(ord_side.as_str(), position.size),
+            (None, Some(pos_side)) => {
+                Self::order_side_matches_position(order.side.as_str(), pos_side.as_str())
+            }
+            (None, None) => true,
+        }
+    }
+
+    fn side_matches_size(ord_side: &str, size: f64) -> bool {
+        let lowered = ord_side.to_ascii_lowercase();
+        match lowered.as_str() {
+            "long" => size > 0.0,
+            "short" => size < 0.0,
+            "net" => size != 0.0,
+            _ => true,
+        }
+    }
+
+    fn order_side_matches_position(order_side: &str, position_side: &str) -> bool {
+        let ord = order_side.to_ascii_lowercase();
+        let pos = position_side.to_ascii_lowercase();
+        match pos.as_str() {
+            "long" => ord == "sell",
+            "short" => ord == "buy",
+            "net" => true,
+            _ => true,
         }
     }
 
@@ -1023,11 +1120,20 @@ impl TuiApp {
             ]),
             price_span,
             size_span,
-            Line::from(format!(
-                "Enter 提交{} · Esc 取消 · Tab 切换字段",
-                input.intent.action_label()
-            )),
         ];
+        if let Some(ord_id) = &input.replace_order_id {
+            lines.push(Line::from(vec![
+                Span::raw("原单 "),
+                Span::styled(
+                    Self::short_order_id(ord_id),
+                    Style::default().fg(Color::LightMagenta),
+                ),
+            ]));
+        }
+        lines.push(Line::from(format!(
+            "Enter 提交{} · Esc 取消 · Tab 切换字段",
+            input.intent.action_label()
+        )));
         if let Some(err) = &input.error {
             lines.push(Line::from(Span::styled(
                 err.as_str(),
@@ -1343,6 +1449,11 @@ impl TuiApp {
                     self.cancel_selected_order();
                 }
             }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                if self.trade.focus == TradeFocus::Orders {
+                    self.start_order_replace();
+                }
+            }
             _ => {}
         }
     }
@@ -1378,6 +1489,9 @@ impl TuiApp {
             "1".to_string(),
             None,
             OrderIntent::Manual,
+            false,
+            None,
+            None,
         );
     }
 
@@ -1402,7 +1516,60 @@ impl TuiApp {
             .unwrap_or_else(|| "".to_string());
         let size = Self::format_contract_size(position.size.abs());
         let pos_side = Self::pos_side_for_position(&position);
-        self.open_order_dialog(inst_id, side, price, size, pos_side, intent);
+        let tag = match intent {
+            OrderIntent::TakeProfit => Some("tp".to_string()),
+            OrderIntent::StopLoss => Some("sl".to_string()),
+            _ => None,
+        };
+        self.open_order_dialog(
+            inst_id, side, price, size, pos_side, intent, true, tag, None,
+        );
+    }
+
+    fn start_order_replace(&mut self) {
+        if !self.trade.trading_enabled() {
+            self.status_message = Some("未配置 OKX API，无法改单".to_string());
+            return;
+        }
+        if self.trade.focus != TradeFocus::Orders {
+            self.status_message = Some("请先切换焦点到挂单列表".to_string());
+            return;
+        }
+        let order = match self.trade.selected_order() {
+            Some(order) => order.clone(),
+            None => {
+                self.status_message = Some("当前无挂单可改单".to_string());
+                return;
+            }
+        };
+        let side = match Self::parse_order_side(order.side.as_str()) {
+            Some(side) => side,
+            None => {
+                self.status_message = Some("无法识别挂单方向，暂不支持改单".to_string());
+                return;
+            }
+        };
+        let price = order
+            .price
+            .map(|value| self.format_price_for(&order.inst_id, value))
+            .or_else(|| {
+                self.latest_prices
+                    .get(&order.inst_id)
+                    .map(|value| self.format_price_for(&order.inst_id, *value))
+            })
+            .unwrap_or_default();
+        let size = Self::format_contract_size(order.size.abs());
+        self.open_order_dialog(
+            order.inst_id.clone(),
+            side,
+            price,
+            size,
+            order.pos_side.clone(),
+            OrderIntent::Modify,
+            order.reduce_only,
+            order.tag.clone(),
+            Some(order.ord_id.clone()),
+        );
     }
 
     fn cancel_selected_order(&mut self) {
@@ -1452,7 +1619,11 @@ impl TuiApp {
         size: String,
         pos_side: Option<String>,
         intent: OrderIntent,
+        reduce_only: bool,
+        tag: Option<String>,
+        replace_order_id: Option<String>,
     ) {
+        let replace_hint = replace_order_id.clone();
         self.trade.input = Some(OrderInputState {
             side,
             inst_id: inst_id.clone(),
@@ -1462,14 +1633,21 @@ impl TuiApp {
             error: None,
             pos_side,
             intent,
+            reduce_only,
+            tag,
+            replace_order_id,
         });
         let action = intent.action_label();
-        self.status_message = Some(format!(
+        let mut status = format!(
             "{} {} {} (Enter 提交)",
             action,
             Self::side_label(side),
             inst_id
-        ));
+        );
+        if let Some(ord_id) = replace_hint {
+            status.push_str(&format!(" · 原单 {}", Self::short_order_id(&ord_id)));
+        }
+        self.status_message = Some(status);
     }
 
     fn handle_order_input_key(&mut self, key: KeyEvent) {
@@ -1507,7 +1685,7 @@ impl TuiApp {
     }
 
     fn finalize_order_input(&mut self) {
-        let (request, intent) = {
+        let (request, intent, replace_ord_id) = {
             let input = match self.trade.input.as_mut() {
                 Some(value) => value,
                 None => return,
@@ -1533,16 +1711,33 @@ impl TuiApp {
                     price,
                     size,
                     pos_side: input.pos_side.clone(),
-                    reduce_only: matches!(
-                        input.intent,
-                        OrderIntent::TakeProfit | OrderIntent::StopLoss
-                    ),
+                    reduce_only: input.reduce_only,
+                    tag: input.tag.clone(),
                 },
                 input.intent,
+                input.replace_order_id.clone(),
             )
         };
         self.trade.input = None;
         if let Some(tx) = self.trade.order_sender() {
+            if let Some(ord_id) = replace_ord_id {
+                let cancel_request = TradingCommand::Cancel(CancelOrderRequest {
+                    inst_id: request.inst_id.clone(),
+                    ord_id,
+                });
+                match tx.try_send(cancel_request) {
+                    Ok(_) => {}
+                    Err(TrySendError::Full(_)) => {
+                        self.status_message =
+                            Some("交易请求繁忙，请稍候再试 (改单取消)".to_string());
+                        return;
+                    }
+                    Err(TrySendError::Closed(_)) => {
+                        self.status_message = Some("交易通道已关闭，无法提交改单请求".to_string());
+                        return;
+                    }
+                }
+            }
             match tx.try_send(TradingCommand::Place(request.clone())) {
                 Ok(_) => {
                     let price_fmt = self.format_price_for(&request.inst_id, request.price);

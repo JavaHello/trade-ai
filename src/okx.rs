@@ -712,6 +712,8 @@ struct TradeOrderRequest {
     pos_side: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reduce_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
 }
 
 impl TradeOrderRequest {
@@ -732,6 +734,7 @@ impl TradeOrderRequest {
             } else {
                 None
             },
+            tag: request.tag.clone(),
         }
     }
 }
@@ -1029,6 +1032,7 @@ async fn fetch_open_orders(
                 size,
                 state: entry.state,
                 reduce_only: parse_bool_flag(&entry.reduce_only),
+                tag: entry.tag,
             });
         }
     }
@@ -1195,6 +1199,8 @@ struct OkxPendingOrderEntry {
     state: String,
     #[serde(rename = "reduceOnly", default)]
     reduce_only: Option<serde_json::Value>,
+    #[serde(default)]
+    tag: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1249,6 +1255,8 @@ struct WsOrderEntry {
     state: String,
     #[serde(rename = "reduceOnly", default)]
     reduce_only: Option<serde_json::Value>,
+    #[serde(default)]
+    tag: Option<String>,
 }
 
 struct AccountState {
@@ -1374,6 +1382,7 @@ impl AccountState {
                             size,
                             state: entry.state.clone(),
                             reduce_only,
+                            tag: entry.tag.clone(),
                         },
                     );
                     changed = true;
