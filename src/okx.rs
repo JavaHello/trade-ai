@@ -345,7 +345,7 @@ impl OkxPrivateWsClient {
                 Ok(websocket) => {
                     backoff = Duration::from_secs(1);
                     if let Err(err) = self
-                        .run_private_stream(websocket, filter.clone())
+                        .run_private_stream(websocket, filter.clone(), inst_ids)
                         .await
                         .context("account stream closed")
                     {
@@ -367,12 +367,22 @@ impl OkxPrivateWsClient {
         &self,
         websocket: WebSocket,
         filter: Option<HashSet<String>>,
+        inst_ids: &[String],
     ) -> Result<(), anyhow::Error> {
         let (mut ws_tx, mut ws_rx) = websocket.split();
         self.send_login(&mut ws_tx).await?;
         self.wait_for_login(&mut ws_tx, &mut ws_rx).await?;
         self.subscribe_private(&mut ws_tx).await?;
         let mut state = AccountState::new(filter);
+        match fetch_account_snapshot(&self.config, inst_ids).await {
+            Ok(snapshot) => {
+                state.seed(&snapshot);
+                let _ = self.tx.send(Command::AccountSnapshot(snapshot));
+            }
+            Err(err) => {
+                self.emit_error(format!("failed to bootstrap account snapshot: {err}"));
+            }
+        }
         while let Some(result) = ws_rx.next().await {
             match result {
                 Ok(Message::Text(text)) => {
@@ -700,6 +710,8 @@ struct TradeOrderRequest {
     px: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pos_side: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reduce_only: Option<bool>,
 }
 
 impl TradeOrderRequest {
@@ -715,6 +727,11 @@ impl TradeOrderRequest {
                 .pos_side
                 .clone()
                 .or_else(|| pos_side_for(&request.inst_id, request.side).map(|s| s.to_string())),
+            reduce_only: if request.reduce_only {
+                Some(true)
+            } else {
+                None
+            },
         }
     }
 }
@@ -1011,6 +1028,7 @@ async fn fetch_open_orders(
                 price,
                 size,
                 state: entry.state,
+                reduce_only: parse_bool_flag(&entry.reduce_only),
             });
         }
     }
@@ -1027,6 +1045,18 @@ fn parse_float_str(value: &str) -> Option<f64> {
         None
     } else {
         trimmed.parse::<f64>().ok()
+    }
+}
+
+fn parse_bool_flag(value: &Option<serde_json::Value>) -> bool {
+    match value {
+        Some(serde_json::Value::Bool(flag)) => *flag,
+        Some(serde_json::Value::String(text)) => {
+            let lowered = text.trim().to_ascii_lowercase();
+            matches!(lowered.as_str(), "true" | "1")
+        }
+        Some(serde_json::Value::Number(num)) => num.as_i64().map(|n| n != 0).unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -1163,6 +1193,8 @@ struct OkxPendingOrderEntry {
     px: Option<String>,
     sz: String,
     state: String,
+    #[serde(rename = "reduceOnly", default)]
+    reduce_only: Option<serde_json::Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1215,6 +1247,8 @@ struct WsOrderEntry {
     px: Option<String>,
     sz: String,
     state: String,
+    #[serde(rename = "reduceOnly", default)]
+    reduce_only: Option<serde_json::Value>,
 }
 
 struct AccountState {
@@ -1235,6 +1269,27 @@ impl AccountState {
             filter,
             positions: HashMap::new(),
             open_orders: HashMap::new(),
+        }
+    }
+
+    fn seed(&mut self, snapshot: &AccountSnapshot) {
+        self.positions.clear();
+        self.open_orders.clear();
+        for position in &snapshot.positions {
+            if !self.accepts(&position.inst_id) {
+                continue;
+            }
+            let key = PositionKey {
+                inst_id: position.inst_id.clone(),
+                pos_side: position.pos_side.clone(),
+            };
+            self.positions.insert(key, position.clone());
+        }
+        for order in &snapshot.open_orders {
+            if !self.accepts(&order.inst_id) {
+                continue;
+            }
+            self.open_orders.insert(order.ord_id.clone(), order.clone());
         }
     }
 
@@ -1297,11 +1352,13 @@ impl AccountState {
             if is_order_active(&entry.state) {
                 let size = entry.sz.parse::<f64>().unwrap_or(0.0);
                 let price = parse_optional_float(entry.px.clone());
+                let reduce_only = parse_bool_flag(&entry.reduce_only);
                 let entry_changed = match self.open_orders.get(&entry.ord_id) {
                     Some(existing) => {
                         existing.size != size
                             || existing.price != price
                             || existing.state != entry.state
+                            || existing.reduce_only != reduce_only
                     }
                     None => true,
                 };
@@ -1316,6 +1373,7 @@ impl AccountState {
                             price,
                             size,
                             state: entry.state.clone(),
+                            reduce_only,
                         },
                     );
                     changed = true;

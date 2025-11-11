@@ -664,6 +664,7 @@ impl TuiApp {
             lines.push(Line::from(format_columns(&[
                 ("合约", ColumnAlign::Left, 14),
                 ("方向", ColumnAlign::Left, 10),
+                ("类型", ColumnAlign::Left, 10),
                 ("数量", ColumnAlign::Right, 10),
                 ("价格", ColumnAlign::Right, 10),
                 ("状态", ColumnAlign::Left, 8),
@@ -681,6 +682,7 @@ impl TuiApp {
                 .take(end.saturating_sub(start))
             {
                 let side_label = Self::order_side_label(&order.side, order.pos_side.as_deref());
+                let intent_label = Self::order_intent_label(order.reduce_only);
                 let price_label = order
                     .price
                     .map(|value| self.format_price_for(&order.inst_id, value))
@@ -690,6 +692,7 @@ impl TuiApp {
                 let row = format_columns(&[
                     (order.inst_id.as_str(), ColumnAlign::Left, 14),
                     (side_label.as_str(), ColumnAlign::Left, 10),
+                    (intent_label, ColumnAlign::Left, 10),
                     (size_label.as_str(), ColumnAlign::Right, 10),
                     (price_label.as_str(), ColumnAlign::Right, 10),
                     (order.state.as_str(), ColumnAlign::Left, 8),
@@ -908,6 +911,14 @@ impl TuiApp {
             Some("short") => format!("{}(空)", base),
             Some("net") => format!("{}(净)", base),
             _ => base,
+        }
+    }
+
+    fn order_intent_label(reduce_only: bool) -> &'static str {
+        if reduce_only {
+            "止盈/止损"
+        } else {
+            "限价开仓"
         }
     }
 
@@ -1522,6 +1533,10 @@ impl TuiApp {
                     price,
                     size,
                     pos_side: input.pos_side.clone(),
+                    reduce_only: matches!(
+                        input.intent,
+                        OrderIntent::TakeProfit | OrderIntent::StopLoss
+                    ),
                 },
                 input.intent,
             )
