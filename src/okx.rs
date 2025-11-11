@@ -218,6 +218,7 @@ impl OkxTradingClient {
                             order_id: None,
                             message: format!("OKX 下单失败: {err}"),
                             success: false,
+                            operator: request.operator.clone(),
                         },
                     };
                     let _ = self
@@ -232,6 +233,7 @@ impl OkxTradingClient {
                             ord_id: request.ord_id.clone(),
                             message: format!("OKX 撤单失败: {err}"),
                             success: false,
+                            operator: request.operator.clone(),
                         },
                     };
                     let _ = self
@@ -616,6 +618,7 @@ fn build_trade_response(request: &TradeRequest, response: TradeOrderResponse) ->
         order_id,
         message,
         success,
+        operator: request.operator.clone(),
     }
 }
 
@@ -660,6 +663,7 @@ fn build_cancel_response(
         ord_id,
         message,
         success,
+        operator: request.operator.clone(),
     }
 }
 

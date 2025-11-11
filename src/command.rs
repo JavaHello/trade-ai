@@ -34,6 +34,26 @@ impl TradeSide {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TradeOperator {
+    Manual,
+    Ai { name: Option<String> },
+    Custom(String),
+}
+
+impl TradeOperator {
+    pub fn label(&self) -> String {
+        match self {
+            TradeOperator::Manual => "手动".to_string(),
+            TradeOperator::Ai { name } => match name {
+                Some(name) if !name.is_empty() => format!("AI:{name}"),
+                _ => "AI".to_string(),
+            },
+            TradeOperator::Custom(value) => value.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRequest {
     pub inst_id: String,
     pub side: TradeSide,
@@ -42,6 +62,7 @@ pub struct TradeRequest {
     pub pos_side: Option<String>,
     pub reduce_only: bool,
     pub tag: Option<String>,
+    pub operator: TradeOperator,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +74,7 @@ pub struct TradeResponse {
     pub order_id: Option<String>,
     pub message: String,
     pub success: bool,
+    pub operator: TradeOperator,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +93,7 @@ pub enum TradingCommand {
 pub struct CancelOrderRequest {
     pub inst_id: String,
     pub ord_id: String,
+    pub operator: TradeOperator,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +102,7 @@ pub struct CancelResponse {
     pub ord_id: String,
     pub message: String,
     pub success: bool,
+    pub operator: TradeOperator,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

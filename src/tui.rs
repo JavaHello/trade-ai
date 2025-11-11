@@ -20,7 +20,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::{
     AccountSnapshot, CancelOrderRequest, Command, PendingOrderInfo, PositionInfo, PricePoint,
-    TradeEvent, TradeRequest, TradeSide, TradingCommand,
+    TradeEvent, TradeOperator, TradeRequest, TradeSide, TradingCommand,
 };
 use crate::trade_log::{TradeLogEntry, TradeLogStore};
 
@@ -912,6 +912,11 @@ impl TuiApp {
                             Span::raw(" @ "),
                             Span::raw(self.format_price_for(&response.inst_id, response.price)),
                             Span::raw(" "),
+                            Span::styled(
+                                format!("[{}]", Self::operator_label(&response.operator)),
+                                Style::default().fg(Self::operator_color(&response.operator)),
+                            ),
+                            Span::raw(" "),
                             Span::styled(status_label, Style::default().fg(status_color)),
                         ]));
                         if let Some(ord_id) = &response.order_id {
@@ -945,6 +950,11 @@ impl TuiApp {
                                 Style::default().fg(Color::DarkGray),
                             ),
                             Span::raw(" "),
+                            Span::styled(
+                                format!("[{}]", Self::operator_label(&cancel.operator)),
+                                Style::default().fg(Self::operator_color(&cancel.operator)),
+                            ),
+                            Span::raw(" "),
                             Span::styled(status_label, Style::default().fg(status_color)),
                         ]));
                         if !cancel.message.is_empty() {
@@ -972,6 +982,18 @@ impl TuiApp {
         let mut truncated = message.chars().take(max_len).collect::<String>();
         truncated.push('…');
         truncated
+    }
+
+    fn operator_label(operator: &TradeOperator) -> String {
+        operator.label()
+    }
+
+    fn operator_color(operator: &TradeOperator) -> Color {
+        match operator {
+            TradeOperator::Manual => Color::DarkGray,
+            TradeOperator::Ai { .. } => Color::LightMagenta,
+            TradeOperator::Custom(_) => Color::LightBlue,
+        }
     }
 
     fn side_label(side: TradeSide) -> &'static str {
@@ -1703,6 +1725,7 @@ impl TuiApp {
         let request = TradingCommand::Cancel(CancelOrderRequest {
             inst_id: order.inst_id.clone(),
             ord_id: order.ord_id.clone(),
+            operator: TradeOperator::Manual,
         });
         match sender.try_send(request) {
             Ok(_) => {
@@ -1811,6 +1834,7 @@ impl TuiApp {
                     pos_side: input.pos_side.clone(),
                     reduce_only: input.reduce_only,
                     tag: input.tag.clone(),
+                    operator: TradeOperator::Manual,
                 },
                 input.intent,
                 input.replace_order_id.clone(),
@@ -1822,6 +1846,7 @@ impl TuiApp {
                 let cancel_request = TradingCommand::Cancel(CancelOrderRequest {
                     inst_id: request.inst_id.clone(),
                     ord_id,
+                    operator: TradeOperator::Manual,
                 });
                 match tx.try_send(cancel_request) {
                     Ok(_) => {}
