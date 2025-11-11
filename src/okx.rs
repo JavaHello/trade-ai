@@ -15,7 +15,8 @@ use tokio::time::{Duration, sleep};
 
 use crate::command::{
     AccountSnapshot, CancelOrderRequest, CancelResponse, Command, PendingOrderInfo, PositionInfo,
-    PricePoint, TradeEvent, TradeRequest, TradeResponse, TradeSide, TradingCommand,
+    PricePoint, SetLeverageRequest, TradeEvent, TradeRequest, TradeResponse, TradeSide,
+    TradingCommand,
 };
 use crate::config::TradingConfig;
 
@@ -77,6 +78,7 @@ const OKX_API_BASE: &str = "https://www.okx.com";
 const MARK_PRICE_CANDLES_ENDPOINT: &str = "https://www.okx.com/api/v5/market/mark-price-candles";
 const TRADE_ORDER_ENDPOINT: &str = "/api/v5/trade/order";
 const CANCEL_ORDER_ENDPOINT: &str = "/api/v5/trade/cancel-order";
+const SET_LEVERAGE_ENDPOINT: &str = "/api/v5/account/set-leverage";
 const POSITIONS_ENDPOINT: &str = "/api/v5/account/positions";
 const ORDERS_PENDING_ENDPOINT: &str = "/api/v5/trade/orders-pending";
 const MAX_CANDLE_LIMIT: usize = 300;
@@ -219,6 +221,7 @@ impl OkxTradingClient {
                             message: format!("OKX 下单失败: {err}"),
                             success: false,
                             operator: request.operator.clone(),
+                            pos_side: request.pos_side.clone(),
                         },
                     };
                     let _ = self
@@ -234,12 +237,25 @@ impl OkxTradingClient {
                             message: format!("OKX 撤单失败: {err}"),
                             success: false,
                             operator: request.operator.clone(),
+                            pos_side: request.pos_side.clone(),
                         },
                     };
                     let _ = self
                         .tx
                         .send(Command::TradeResult(TradeEvent::Cancel(response)));
                 }
+                TradingCommand::SetLeverage(request) => match self.set_leverage(&request).await {
+                    Ok(_) => {
+                        let message =
+                            format!("杠杆已调整至 {}x", format_leverage_display(request.lever));
+                        let _ = self
+                            .tx
+                            .send(Command::Notify(request.inst_id.clone(), message));
+                    }
+                    Err(err) => {
+                        let _ = self.tx.send(Command::Error(format!("调整杠杆失败: {err}")));
+                    }
+                },
             }
         }
         Ok(())
@@ -308,6 +324,45 @@ impl OkxTradingClient {
             .await
             .with_context(|| "decoding OKX cancel response")?;
         Ok(build_cancel_response(request, response))
+    }
+
+    async fn set_leverage(&self, request: &SetLeverageRequest) -> Result<(), anyhow::Error> {
+        let payload = SetLeveragePayload::from_request(request, &self.config.td_mode);
+        let body = serde_json::to_string(&payload)?;
+        let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let signature = sign_payload(
+            &self.config.api_secret,
+            &timestamp,
+            "POST",
+            SET_LEVERAGE_ENDPOINT,
+            &body,
+        )?;
+        let response = self
+            .client
+            .post(format!("{OKX_API_BASE}{SET_LEVERAGE_ENDPOINT}"))
+            .header("OK-ACCESS-KEY", &self.config.api_key)
+            .header("OK-ACCESS-PASSPHRASE", &self.config.passphrase)
+            .header("OK-ACCESS-TIMESTAMP", &timestamp)
+            .header("OK-ACCESS-SIGN", signature)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .with_context(|| "sending set leverage request to OKX")?
+            .error_for_status()
+            .with_context(|| "OKX returned non-success status for set leverage")?
+            .json::<SetLeverageResponse>()
+            .await
+            .with_context(|| "decoding OKX set leverage response")?;
+        if response.code != "0" {
+            let message = if response.msg.is_empty() {
+                "OKX 调整杠杆失败".to_string()
+            } else {
+                response.msg
+            };
+            return Err(anyhow!(message));
+        }
+        Ok(())
     }
 }
 
@@ -619,6 +674,7 @@ fn build_trade_response(request: &TradeRequest, response: TradeOrderResponse) ->
         message,
         success,
         operator: request.operator.clone(),
+        pos_side: request.pos_side.clone(),
     }
 }
 
@@ -664,6 +720,7 @@ fn build_cancel_response(
         message,
         success,
         operator: request.operator.clone(),
+        pos_side: request.pos_side.clone(),
     }
 }
 
@@ -687,6 +744,20 @@ fn format_float(value: f64) -> String {
         repr.pop();
     }
     if repr.ends_with('.') {
+        repr.push('0');
+    }
+    repr
+}
+
+fn format_leverage_display(value: f64) -> String {
+    let mut repr = format!("{value:.4}");
+    while repr.contains('.') && repr.ends_with('0') {
+        repr.pop();
+    }
+    if repr.ends_with('.') {
+        repr.pop();
+    }
+    if repr.is_empty() {
         repr.push('0');
     }
     repr
@@ -759,6 +830,27 @@ impl CancelOrderPayload {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetLeveragePayload {
+    inst_id: String,
+    lever: String,
+    mgn_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pos_side: Option<String>,
+}
+
+impl SetLeveragePayload {
+    fn from_request(request: &SetLeverageRequest, td_mode: &str) -> Self {
+        SetLeveragePayload {
+            inst_id: request.inst_id.clone(),
+            lever: format_leverage_display(request.lever),
+            mgn_mode: td_mode.to_string(),
+            pos_side: request.pos_side.clone(),
+        }
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TradeOrderResponse {
@@ -775,6 +867,28 @@ struct TradeOrderResponseData {
     _cl_ord_id: Option<String>,
     s_code: String,
     s_msg: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetLeverageResponse {
+    code: String,
+    msg: String,
+    #[serde(default)]
+    _data: Vec<SetLeverageResponseEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetLeverageResponseEntry {
+    #[allow(dead_code)]
+    inst_id: Option<String>,
+    #[allow(dead_code)]
+    lever: Option<String>,
+    #[allow(dead_code)]
+    mgn_mode: Option<String>,
+    #[allow(dead_code)]
+    pos_side: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1027,6 +1141,7 @@ async fn fetch_open_orders(
         for entry in response.data {
             let size = entry.sz.parse::<f64>().unwrap_or(0.0);
             let price = parse_optional_float(entry.px);
+            let lever = parse_optional_float(entry.lever.clone());
             open_orders.push(PendingOrderInfo {
                 inst_id: entry.inst_id,
                 ord_id: entry.ord_id,
@@ -1037,6 +1152,7 @@ async fn fetch_open_orders(
                 state: entry.state,
                 reduce_only: parse_bool_flag(&entry.reduce_only),
                 tag: entry.tag,
+                lever,
             });
         }
     }
@@ -1205,6 +1321,8 @@ struct OkxPendingOrderEntry {
     reduce_only: Option<serde_json::Value>,
     #[serde(default)]
     tag: Option<String>,
+    #[serde(default)]
+    lever: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1261,6 +1379,8 @@ struct WsOrderEntry {
     reduce_only: Option<serde_json::Value>,
     #[serde(default)]
     tag: Option<String>,
+    #[serde(default)]
+    lever: Option<String>,
 }
 
 struct AccountState {
@@ -1365,12 +1485,14 @@ impl AccountState {
                 let size = entry.sz.parse::<f64>().unwrap_or(0.0);
                 let price = parse_optional_float(entry.px.clone());
                 let reduce_only = parse_bool_flag(&entry.reduce_only);
+                let lever = parse_optional_float(entry.lever.clone());
                 let entry_changed = match self.open_orders.get(&entry.ord_id) {
                     Some(existing) => {
                         existing.size != size
                             || existing.price != price
                             || existing.state != entry.state
                             || existing.reduce_only != reduce_only
+                            || existing.lever != lever
                     }
                     None => true,
                 };
@@ -1387,6 +1509,7 @@ impl AccountState {
                             state: entry.state.clone(),
                             reduce_only,
                             tag: entry.tag.clone(),
+                            lever,
                         },
                     );
                     changed = true;

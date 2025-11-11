@@ -8,26 +8,32 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::TradeEvent;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TradeLogEntry {
     pub timestamp: DateTime<Local>,
     pub event: TradeEvent,
+    pub leverage: Option<f64>,
 }
 
 impl TradeLogEntry {
-    pub fn from_event(event: TradeEvent) -> Self {
+    pub fn from_event(event: TradeEvent, leverage: Option<f64>) -> Self {
         TradeLogEntry {
             timestamp: Local::now(),
             event,
+            leverage,
         }
     }
 
-    fn from_parts(timestamp_ms: i64, event: TradeEvent) -> Self {
+    fn from_parts(timestamp_ms: i64, event: TradeEvent, leverage: Option<f64>) -> Self {
         let timestamp = match Local.timestamp_millis_opt(timestamp_ms) {
             LocalResult::Single(dt) => dt,
             _ => Local::now(),
         };
-        TradeLogEntry { timestamp, event }
+        TradeLogEntry {
+            timestamp,
+            event,
+            leverage,
+        }
     }
 
     fn timestamp_ms(&self) -> i64 {
@@ -125,11 +131,13 @@ impl TradeLogStore {
 struct StoredTradeLogEntry {
     timestamp_ms: i64,
     event: TradeEvent,
+    #[serde(default)]
+    leverage: Option<f64>,
 }
 
 impl StoredTradeLogEntry {
     fn into_entry(self) -> TradeLogEntry {
-        TradeLogEntry::from_parts(self.timestamp_ms, self.event)
+        TradeLogEntry::from_parts(self.timestamp_ms, self.event, self.leverage)
     }
 }
 
@@ -138,6 +146,7 @@ impl From<&TradeLogEntry> for StoredTradeLogEntry {
         StoredTradeLogEntry {
             timestamp_ms: value.timestamp_ms(),
             event: value.event.clone(),
+            leverage: value.leverage,
         }
     }
 }

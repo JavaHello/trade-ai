@@ -18,7 +18,7 @@ pub struct PricePoint {
     pub precision: usize,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TradeSide {
     Buy,
     Sell,
@@ -33,7 +33,7 @@ impl TradeSide {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TradeOperator {
     Manual,
     Ai { name: Option<String> },
@@ -65,7 +65,7 @@ pub struct TradeRequest {
     pub operator: TradeOperator,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TradeResponse {
     pub inst_id: String,
     pub side: TradeSide,
@@ -75,9 +75,11 @@ pub struct TradeResponse {
     pub message: String,
     pub success: bool,
     pub operator: TradeOperator,
+    #[serde(default)]
+    pub pos_side: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TradeEvent {
     Order(TradeResponse),
     Cancel(CancelResponse),
@@ -87,6 +89,7 @@ pub enum TradeEvent {
 pub enum TradingCommand {
     Place(TradeRequest),
     Cancel(CancelOrderRequest),
+    SetLeverage(SetLeverageRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,15 +97,25 @@ pub struct CancelOrderRequest {
     pub inst_id: String,
     pub ord_id: String,
     pub operator: TradeOperator,
+    pub pos_side: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CancelResponse {
     pub inst_id: String,
     pub ord_id: String,
     pub message: String,
     pub success: bool,
     pub operator: TradeOperator,
+    #[serde(default)]
+    pub pos_side: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetLeverageRequest {
+    pub inst_id: String,
+    pub lever: f64,
+    pub pos_side: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,4 +144,5 @@ pub struct PendingOrderInfo {
     pub state: String,
     pub reduce_only: bool,
     pub tag: Option<String>,
+    pub lever: Option<f64>,
 }

@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::GraphType;
-use ratatui::widgets::{Axis, Block, Chart, Clear, Dataset, Paragraph};
+use ratatui::widgets::{Axis, Block, Chart, Clear, Dataset, Paragraph, Wrap};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{broadcast, mpsc};
 
@@ -20,7 +20,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::{
     AccountSnapshot, CancelOrderRequest, Command, PendingOrderInfo, PositionInfo, PricePoint,
-    TradeEvent, TradeOperator, TradeRequest, TradeSide, TradingCommand,
+    SetLeverageRequest, TradeEvent, TradeOperator, TradeRequest, TradeSide, TradingCommand,
 };
 use crate::trade_log::{TradeLogEntry, TradeLogStore};
 
@@ -36,6 +36,7 @@ const COLOR_PALETTE: [Color; 8] = [
 ];
 const EMPTY_SERIES: &[(f64, f64)] = &[];
 const MAX_TRADE_LOGS: usize = 1000;
+const LEVERAGE_EPSILON: f64 = 1e-6;
 
 #[derive(Clone, Debug)]
 struct AxisInfo {
@@ -64,6 +65,7 @@ enum ViewMode {
 enum OrderInputField {
     Price,
     Size,
+    Leverage,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +90,8 @@ struct OrderInputState {
     inst_id: String,
     price: String,
     size: String,
+    leverage: String,
+    initial_leverage: Option<f64>,
     active_field: OrderInputField,
     error: Option<String>,
     pos_side: Option<String>,
@@ -102,16 +106,16 @@ struct TradeState {
     selected_inst_idx: usize,
     selected_position_idx: usize,
     selected_order_idx: usize,
+    selected_log_idx: usize,
     input: Option<OrderInputState>,
     order_tx: Option<mpsc::Sender<TradingCommand>>,
     logs: Vec<TradeLogEntry>,
-    log_scroll: u16,
-    log_max_scroll: u16,
     log_view_height: u16,
     positions: Vec<PositionInfo>,
     open_orders: Vec<PendingOrderInfo>,
     focus: TradeFocus,
     log_store: Option<TradeLogStore>,
+    log_detail: Option<TradeLogEntry>,
 }
 
 impl TradeState {
@@ -123,16 +127,16 @@ impl TradeState {
             selected_inst_idx: 0,
             selected_position_idx: 0,
             selected_order_idx: 0,
+            selected_log_idx: 0,
             input: None,
             order_tx,
             logs: Vec::new(),
-            log_scroll: 0,
-            log_max_scroll: 0,
             log_view_height: 0,
             positions: Vec::new(),
             open_orders: Vec::new(),
             focus: TradeFocus::Instruments,
             log_store,
+            log_detail: None,
         }
     }
 
@@ -162,12 +166,20 @@ impl TradeState {
         }
     }
 
+    fn ensure_log_selection(&mut self) {
+        if self.logs.is_empty() {
+            self.selected_log_idx = 0;
+        } else if self.selected_log_idx >= self.logs.len() {
+            self.selected_log_idx = self.logs.len().saturating_sub(1);
+        }
+    }
+
     fn move_focus(&mut self, inst_ids: &[String], delta: isize) {
         match self.focus {
             TradeFocus::Instruments => self.move_instruments(inst_ids, delta),
             TradeFocus::Positions => self.move_positions(delta),
             TradeFocus::Orders => self.move_orders(delta),
-            TradeFocus::Logs => self.scroll_logs(delta),
+            TradeFocus::Logs => self.move_logs(delta),
         }
     }
 
@@ -242,19 +254,32 @@ impl TradeState {
         for entry in entries {
             self.push_log(entry);
         }
+        self.selected_log_idx = self.logs.len().saturating_sub(1);
         Ok(count)
     }
 
     fn push_log(&mut self, entry: TradeLogEntry) {
+        let was_empty = self.logs.is_empty();
         self.logs.push(entry);
         if self.logs.len() > MAX_TRADE_LOGS {
             let overflow = self.logs.len() - MAX_TRADE_LOGS;
             self.logs.drain(0..overflow);
+            if self.logs.is_empty() {
+                self.selected_log_idx = 0;
+            } else if overflow > 0 {
+                self.selected_log_idx = self.selected_log_idx.saturating_sub(overflow);
+            }
+        }
+        if was_empty {
+            self.selected_log_idx = self.logs.len().saturating_sub(1);
+        } else {
+            self.ensure_log_selection();
         }
     }
 
     fn record_result(&mut self, event: TradeEvent) -> AnyResult<()> {
-        let entry = TradeLogEntry::from_event(event);
+        let leverage = self.leverage_for_event(&event);
+        let entry = TradeLogEntry::from_event(event, leverage);
         self.push_log(entry.clone());
         if let Some(store) = &self.log_store {
             store.append(&entry)?;
@@ -330,44 +355,121 @@ impl TradeState {
         }
     }
 
-    fn scroll_logs(&mut self, delta: isize) {
-        if delta == 0 {
+    fn move_logs(&mut self, delta: isize) {
+        if delta == 0 || self.logs.is_empty() {
             return;
         }
-        let current = self.log_scroll as isize;
-        let mut next = current + delta;
-        if next < 0 {
-            next = 0;
+        let len = self.logs.len() as isize;
+        let current_display = len - 1 - self.selected_log_idx.min(self.logs.len() - 1) as isize;
+        let mut next_display = current_display + delta;
+        if next_display < 0 {
+            next_display = 0;
+        } else if next_display >= len {
+            next_display = len - 1;
         }
-        let max = self.log_max_scroll as isize;
-        if next > max {
-            next = max;
-        }
-        self.log_scroll = next as u16;
+        self.selected_log_idx = (len - 1 - next_display) as usize;
     }
 
     fn page_scroll_logs(&mut self, pages: isize) {
-        if pages == 0 {
+        if pages == 0 || self.logs.is_empty() {
             return;
         }
         let height = self.log_view_height.max(1) as isize;
-        let delta = height * pages;
-        self.scroll_logs(delta);
+        self.move_logs(height * pages);
     }
 
     fn scroll_logs_to_start(&mut self) {
-        self.log_scroll = 0;
+        if self.logs.is_empty() {
+            return;
+        }
+        self.selected_log_idx = self.logs.len().saturating_sub(1);
     }
 
     fn scroll_logs_to_end(&mut self) {
-        self.log_scroll = self.log_max_scroll;
+        if self.logs.is_empty() {
+            return;
+        }
+        self.selected_log_idx = 0;
     }
 
-    fn set_log_view_metrics(&mut self, view_height: u16, max_scroll: u16) {
+    fn set_log_view_height(&mut self, view_height: u16) {
         self.log_view_height = view_height.max(1);
-        self.log_max_scroll = max_scroll;
-        if self.log_scroll > self.log_max_scroll {
-            self.log_scroll = self.log_max_scroll;
+    }
+
+    fn leverage_for_event(&self, event: &TradeEvent) -> Option<f64> {
+        match event {
+            TradeEvent::Order(response) => {
+                self.leverage_for_inst(&response.inst_id, response.pos_side.as_deref())
+            }
+            TradeEvent::Cancel(cancel) => {
+                self.leverage_for_inst(&cancel.inst_id, cancel.pos_side.as_deref())
+            }
+        }
+    }
+
+    fn leverage_for_inst(&self, inst_id: &str, pos_side: Option<&str>) -> Option<f64> {
+        if let Some(side) = pos_side {
+            let side_lower = side.to_ascii_lowercase();
+            for position in &self.positions {
+                if !position.inst_id.eq_ignore_ascii_case(inst_id) {
+                    continue;
+                }
+                if position
+                    .pos_side
+                    .as_deref()
+                    .map(|value| value.eq_ignore_ascii_case(&side_lower))
+                    .unwrap_or(false)
+                {
+                    return position.lever;
+                }
+            }
+            return None;
+        }
+        let mut matched: Option<&PositionInfo> = None;
+        for position in &self.positions {
+            if !position.inst_id.eq_ignore_ascii_case(inst_id) {
+                continue;
+            }
+            if matched.is_some() {
+                return None;
+            }
+            matched = Some(position);
+        }
+        matched.and_then(|pos| pos.lever)
+    }
+
+    fn selected_log_display_index(&self) -> usize {
+        if self.logs.is_empty() {
+            0
+        } else {
+            let idx = self.selected_log_idx.min(self.logs.len() - 1);
+            self.logs.len().saturating_sub(1) - idx
+        }
+    }
+
+    fn selected_log_entry(&self) -> Option<&TradeLogEntry> {
+        if self.logs.is_empty() {
+            None
+        } else {
+            let idx = self.selected_log_idx.min(self.logs.len().saturating_sub(1));
+            self.logs.get(idx)
+        }
+    }
+
+    fn toggle_log_detail(&mut self) {
+        if let Some(active) = &self.log_detail {
+            if let Some(selected) = self.selected_log_entry() {
+                if active == selected {
+                    self.log_detail = None;
+                    return;
+                }
+            } else {
+                self.log_detail = None;
+                return;
+            }
+        }
+        if let Some(entry) = self.selected_log_entry().cloned() {
+            self.log_detail = Some(entry);
         }
     }
 }
@@ -377,13 +479,23 @@ impl OrderInputState {
         match self.active_field {
             OrderInputField::Price => &mut self.price,
             OrderInputField::Size => &mut self.size,
+            OrderInputField::Leverage => &mut self.leverage,
         }
     }
 
-    fn switch_field(&mut self) {
+    fn focus_next_field(&mut self) {
         self.active_field = match self.active_field {
             OrderInputField::Price => OrderInputField::Size,
+            OrderInputField::Size => OrderInputField::Leverage,
+            OrderInputField::Leverage => OrderInputField::Price,
+        };
+    }
+
+    fn focus_prev_field(&mut self) {
+        self.active_field = match self.active_field {
+            OrderInputField::Price => OrderInputField::Leverage,
             OrderInputField::Size => OrderInputField::Price,
+            OrderInputField::Leverage => OrderInputField::Size,
         };
     }
 }
@@ -539,6 +651,11 @@ impl TuiApp {
                             terminal.draw(|frame| self.render(frame))?;
                             self.last_draw = Instant::now();
                         }
+                        Ok(Command::Notify(inst_id, message)) => {
+                            self.set_status_message(format!("{inst_id}: {message}"));
+                            terminal.draw(|frame| self.render(frame))?;
+                            self.last_draw = Instant::now();
+                        }
                         Ok(Command::TradeResult(event)) => {
                             let (message, is_error) = match &event {
                                 TradeEvent::Order(response) => {
@@ -579,7 +696,6 @@ impl TuiApp {
                         Ok(Command::Exit) => {
                             return Ok(());
                         }
-                        Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     }
@@ -669,6 +785,9 @@ impl TuiApp {
         }
         if let Some(input) = &self.trade.input {
             self.render_order_dialog(frame, main_area, input);
+        }
+        if let Some(detail) = &self.trade.log_detail {
+            self.render_log_detail(frame, main_area, detail);
         }
     }
 
@@ -806,6 +925,7 @@ impl TuiApp {
                 ("类型", ColumnAlign::Left, 10),
                 ("数量", ColumnAlign::Right, 10),
                 ("价格", ColumnAlign::Right, 10),
+                ("杠杆", ColumnAlign::Right, 8),
                 ("状态", ColumnAlign::Left, 8),
                 ("订单", ColumnAlign::Left, 12),
             ])));
@@ -828,12 +948,14 @@ impl TuiApp {
                     .unwrap_or_else(|| "--".to_string());
                 let size_label = Self::format_contract_size(order.size);
                 let ord_label = Self::short_order_id(&order.ord_id);
+                let lever_label = Self::leverage_label(order.lever);
                 let row = format_columns(&[
                     (order.inst_id.as_str(), ColumnAlign::Left, 14),
                     (side_label.as_str(), ColumnAlign::Left, 10),
                     (intent_label, ColumnAlign::Left, 10),
                     (size_label.as_str(), ColumnAlign::Right, 10),
                     (price_label.as_str(), ColumnAlign::Right, 10),
+                    (lever_label.as_str(), ColumnAlign::Right, 8),
                     (order.state.as_str(), ColumnAlign::Left, 8),
                     (ord_label.as_str(), ColumnAlign::Left, 12),
                 ]);
@@ -926,7 +1048,7 @@ impl TuiApp {
             TradeFocus::Positions => "焦点 持仓：↑↓/j k 选择持仓 · p 止盈 · l 止损",
             TradeFocus::Orders => "焦点 挂单：↑↓/j k 选择挂单 · c 撤单 · r 改单",
             TradeFocus::Logs => {
-                "焦点 委托记录：↑↓/j k 滚动 · PageUp/PageDown 翻页 · Home/End 顶/底"
+                "焦点 委托记录：↑↓/j k 选择 · PageUp/PageDown 翻页 · Home/End 顶/底 · o 详情"
             }
         };
         Some(hint.to_string())
@@ -934,147 +1056,151 @@ impl TuiApp {
 
     fn render_trade_activity(&mut self, frame: &mut Frame, area: Rect) {
         let log_count = self.trade.logs.len();
-        let log_entries: Vec<TradeLogEntry> = self.trade.logs.iter().rev().cloned().collect();
-        let lines = {
-            let mut lines = Vec::new();
-            if self.trade.logs.is_empty() {
-                if self.trade.trading_enabled() {
-                    lines.push(Line::from("暂无委托，按 b/s 提交订单"));
-                } else {
-                    lines.push(Line::from("未配置 OKX API，无法下单"));
-                }
+        let mut lines = Vec::new();
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let list_visible = inner_height.saturating_sub(1);
+        if log_count == 0 {
+            if self.trade.trading_enabled() {
+                lines.push(Line::from("暂无委托，按 b/s 提交订单"));
             } else {
-                lines.push(Line::from("时间     类型  明细"));
-                for entry in log_entries.iter() {
-                    let time = entry.timestamp.format("%H:%M:%S").to_string();
-                    match &entry.event {
-                        TradeEvent::Order(response) => {
-                            let side_short = Self::side_short_label(response.side);
-                            let side_color = Self::side_color(response.side);
-                            let status_color = Self::status_color(response.success);
-                            let status_label = Self::status_label(response.success);
-                            let size_label = Self::format_contract_size(response.size);
-                            lines.push(Line::from(vec![
-                                Span::raw(format!("{time} ")),
-                                Span::styled(
-                                    "委托 ",
-                                    Style::default()
-                                        .fg(Color::LightBlue)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw(format!("{:<10}", response.inst_id)),
-                                Span::styled(
-                                    format!("{:<2}", side_short),
-                                    Style::default().fg(side_color).add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw(" "),
-                                Span::raw(format!("{:>10}", size_label)),
-                                Span::raw(" @ "),
-                                Span::raw(self.format_price_for(&response.inst_id, response.price)),
-                                Span::raw(" "),
-                                Span::styled(
-                                    format!("[{}]", Self::operator_label(&response.operator)),
-                                    Style::default().fg(Self::operator_color(&response.operator)),
-                                ),
-                                Span::raw(" "),
-                                Span::styled(status_label, Style::default().fg(status_color)),
-                            ]));
-                            if let Some(ord_id) = &response.order_id {
-                                lines.push(Line::from(vec![
-                                    Span::raw("订单ID "),
-                                    Span::styled(
-                                        ord_id.as_str(),
-                                        Style::default().fg(Color::DarkGray),
-                                    ),
-                                ]));
-                            }
-                            if !response.message.is_empty() {
-                                lines.push(Line::from(Span::styled(
-                                    Self::truncate_message(&response.message, 80),
-                                    Style::default().fg(status_color),
-                                )));
-                            }
-                        }
-                        TradeEvent::Cancel(cancel) => {
-                            let status_color = Self::status_color(cancel.success);
-                            let status_label = Self::status_label(cancel.success);
-                            lines.push(Line::from(vec![
-                                Span::raw(format!("{time} ")),
-                                Span::styled(
-                                    "撤单 ",
-                                    Style::default()
-                                        .fg(Color::LightYellow)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw(format!("{:<10}", cancel.inst_id)),
-                                Span::raw(" "),
-                                Span::styled(
-                                    Self::short_order_id(&cancel.ord_id),
-                                    Style::default().fg(Color::DarkGray),
-                                ),
-                                Span::raw(" "),
-                                Span::styled(
-                                    format!("[{}]", Self::operator_label(&cancel.operator)),
-                                    Style::default().fg(Self::operator_color(&cancel.operator)),
-                                ),
-                                Span::raw(" "),
-                                Span::styled(status_label, Style::default().fg(status_color)),
-                            ]));
-                            if !cancel.message.is_empty() {
-                                lines.push(Line::from(Span::styled(
-                                    Self::truncate_message(&cancel.message, 80),
-                                    Style::default().fg(status_color),
-                                )));
-                            }
-                        }
-                    }
-                    lines.push(Line::from(" "));
-                }
+                lines.push(Line::from("未配置 OKX API，无法下单"));
             }
-            lines
-        };
+        } else if list_visible == 0 {
+            lines.push(Line::from("窗口高度不足，无法显示委托记录"));
+        } else {
+            lines.push(Line::from(format_columns(&[
+                ("时间", ColumnAlign::Left, 8),
+                ("类型", ColumnAlign::Left, 4),
+                ("合约", ColumnAlign::Left, 14),
+                ("方向/单号", ColumnAlign::Left, 10),
+                ("数量", ColumnAlign::Right, 10),
+                ("价格", ColumnAlign::Right, 10),
+                ("杠杆", ColumnAlign::Right, 6),
+                ("状态", ColumnAlign::Left, 6),
+                ("操作者", ColumnAlign::Left, 10),
+            ])));
+            let log_focus = self.trade.focus == TradeFocus::Logs;
+            let selected_display_idx = self.trade.selected_log_display_index();
+            let (start, end) = visible_range(log_count, list_visible, selected_display_idx);
+            let mut display_idx = start;
+            for entry in self
+                .trade
+                .logs
+                .iter()
+                .rev()
+                .skip(start)
+                .take(end.saturating_sub(start))
+            {
+                let highlight = log_focus && display_idx == selected_display_idx;
+                lines.push(self.render_log_row(entry, highlight));
+                display_idx += 1;
+            }
+        }
         let title = format!("委托记录 {log_count}/{MAX_TRADE_LOGS}");
         let mut block = Block::bordered().title(title);
         if self.trade.focus == TradeFocus::Logs {
             block = block.border_style(Style::default().fg(Color::LightMagenta));
         }
-        let mut text_height = area.height.saturating_sub(2);
-        if text_height == 0 {
-            text_height = 1;
-        }
-        let total_lines = lines.len();
-        let max_scroll = total_lines.saturating_sub(text_height as usize);
-        let max_scroll_u16 = max_scroll.min(u16::MAX as usize) as u16;
-        let view_height_u16 = text_height.min(u16::MAX);
+        let page_height = list_visible.max(1);
         self.trade
-            .set_log_view_metrics(view_height_u16, max_scroll_u16);
-        let scroll = self.trade.log_scroll;
+            .set_log_view_height(page_height.min(u16::MAX as usize) as u16);
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
-            .block(block)
-            .scroll((scroll, 0));
+            .block(block);
         frame.render_widget(paragraph, area);
     }
 
-    fn truncate_message(message: &str, max_len: usize) -> String {
-        if message.chars().count() <= max_len {
-            return message.to_string();
+    fn render_log_row(&self, entry: &TradeLogEntry, highlight: bool) -> Line<'static> {
+        let columns = self.log_row_columns(entry);
+        let column_count = columns.len();
+        let mut spans = Vec::new();
+        for (idx, (value, align, width, color)) in columns.into_iter().enumerate() {
+            let text = format_column_value(&value, align, width);
+            let mut style = Style::default();
+            if let Some(color) = color {
+                style = style.fg(color);
+            }
+            if highlight {
+                style = style.bg(Color::LightCyan).add_modifier(Modifier::BOLD);
+            }
+            spans.push(Span::styled(text, style));
+            if idx + 1 != column_count {
+                let mut spacer_style = Style::default();
+                if highlight {
+                    spacer_style = spacer_style
+                        .bg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD);
+                }
+                spans.push(Span::styled(" ".to_string(), spacer_style));
+            }
         }
-        let mut truncated = message.chars().take(max_len).collect::<String>();
-        truncated.push('…');
-        truncated
+        Line::from(spans)
+    }
+
+    fn log_row_columns(
+        &self,
+        entry: &TradeLogEntry,
+    ) -> Vec<(String, ColumnAlign, usize, Option<Color>)> {
+        let time = entry.timestamp.format("%H:%M:%S").to_string();
+        let leverage_label = Self::leverage_label(entry.leverage);
+        match &entry.event {
+            TradeEvent::Order(response) => {
+                let side_label = Self::side_short_label(response.side).to_string();
+                let size_label = Self::format_contract_size(response.size);
+                let price_label = self.format_price_for(&response.inst_id, response.price);
+                let status_color = Self::status_color(response.success);
+                vec![
+                    (time, ColumnAlign::Left, 8, None),
+                    ("委托".to_string(), ColumnAlign::Left, 4, None),
+                    (response.inst_id.clone(), ColumnAlign::Left, 14, None),
+                    (side_label, ColumnAlign::Left, 10, None),
+                    (size_label, ColumnAlign::Right, 10, None),
+                    (price_label, ColumnAlign::Right, 10, None),
+                    (leverage_label, ColumnAlign::Right, 6, None),
+                    (
+                        Self::status_label(response.success).to_string(),
+                        ColumnAlign::Left,
+                        6,
+                        Some(status_color),
+                    ),
+                    (
+                        Self::operator_label(&response.operator),
+                        ColumnAlign::Left,
+                        10,
+                        None,
+                    ),
+                ]
+            }
+            TradeEvent::Cancel(cancel) => {
+                let ord_short = Self::short_order_id(&cancel.ord_id);
+                let status_color = Self::status_color(cancel.success);
+                vec![
+                    (time, ColumnAlign::Left, 8, None),
+                    ("撤单".to_string(), ColumnAlign::Left, 4, None),
+                    (cancel.inst_id.clone(), ColumnAlign::Left, 14, None),
+                    (ord_short, ColumnAlign::Left, 10, None),
+                    ("--".to_string(), ColumnAlign::Right, 10, None),
+                    ("--".to_string(), ColumnAlign::Right, 10, None),
+                    (leverage_label, ColumnAlign::Right, 6, None),
+                    (
+                        Self::status_label(cancel.success).to_string(),
+                        ColumnAlign::Left,
+                        6,
+                        Some(status_color),
+                    ),
+                    (
+                        Self::operator_label(&cancel.operator),
+                        ColumnAlign::Left,
+                        10,
+                        None,
+                    ),
+                ]
+            }
+        }
     }
 
     fn operator_label(operator: &TradeOperator) -> String {
         operator.label()
-    }
-
-    fn operator_color(operator: &TradeOperator) -> Color {
-        match operator {
-            TradeOperator::Manual => Color::DarkGray,
-            TradeOperator::Ai { .. } => Color::LightMagenta,
-            TradeOperator::Custom(_) => Color::LightBlue,
-        }
     }
 
     fn side_label(side: TradeSide) -> &'static str {
@@ -1098,13 +1224,6 @@ impl TuiApp {
         match side {
             TradeSide::Buy => "买",
             TradeSide::Sell => "卖",
-        }
-    }
-
-    fn side_color(side: TradeSide) -> Color {
-        match side {
-            TradeSide::Buy => Color::LightGreen,
-            TradeSide::Sell => Color::LightRed,
         }
     }
 
@@ -1323,6 +1442,11 @@ impl TuiApp {
             &input.size,
             input.active_field == OrderInputField::Size,
         );
+        let leverage_span = self.order_field_span(
+            "杠杆(x)",
+            &input.leverage,
+            input.active_field == OrderInputField::Leverage,
+        );
         let mut lines = vec![
             Line::from(vec![
                 Span::raw("合约 "),
@@ -1333,6 +1457,7 @@ impl TuiApp {
             ]),
             price_span,
             size_span,
+            leverage_span,
         ];
         if let Some(ord_id) = &input.replace_order_id {
             lines.push(Line::from(vec![
@@ -1344,7 +1469,7 @@ impl TuiApp {
             ]));
         }
         lines.push(Line::from(format!(
-            "Enter 提交{} · Esc 取消 · Tab 切换字段",
+            "Enter 提交{} · Esc 取消 · Tab/Shift+Tab 切换字段",
             input.intent.action_label()
         )));
         if let Some(err) = &input.error {
@@ -1356,6 +1481,77 @@ impl TuiApp {
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
             .block(block);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(paragraph, popup);
+    }
+
+    fn render_log_detail(&self, frame: &mut Frame, area: Rect, entry: &TradeLogEntry) {
+        if area.width < 30 || area.height < 8 {
+            return;
+        }
+        let popup_width = area.width.saturating_sub(10).min(72).max(40);
+        let popup_height = area.height.min(14).max(8);
+        let left = area.x + (area.width.saturating_sub(popup_width)) / 2;
+        let top = area.y + (area.height.saturating_sub(popup_height)) / 2;
+        let popup = Rect::new(left, top, popup_width, popup_height);
+        let timestamp = entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut lines = vec![Line::from(format!("时间 {timestamp}"))];
+        let (title, status_success, message) = match &entry.event {
+            TradeEvent::Order(response) => {
+                lines.push(Line::from(format!("合约 {}", response.inst_id)));
+                lines.push(Line::from(format!(
+                    "方向 {} · 数量 {}",
+                    Self::side_label(response.side),
+                    Self::format_contract_size(response.size),
+                )));
+                lines.push(Line::from(format!(
+                    "价格 {}",
+                    self.format_price_for(&response.inst_id, response.price),
+                )));
+                if let Some(ord_id) = &response.order_id {
+                    lines.push(Line::from(format!("订单ID {}", ord_id)));
+                }
+                lines.push(Line::from(format!(
+                    "操作者 {}",
+                    Self::operator_label(&response.operator)
+                )));
+                ("委托详情", response.success, response.message.clone())
+            }
+            TradeEvent::Cancel(cancel) => {
+                lines.push(Line::from(format!("合约 {}", cancel.inst_id)));
+                lines.push(Line::from(format!(
+                    "订单 {}",
+                    Self::short_order_id(&cancel.ord_id)
+                )));
+                lines.push(Line::from(format!(
+                    "操作者 {}",
+                    Self::operator_label(&cancel.operator)
+                )));
+                ("撤单详情", cancel.success, cancel.message.clone())
+            }
+        };
+        lines.push(Line::from(format!(
+            "杠杆 {}",
+            Self::leverage_label(entry.leverage)
+        )));
+        let status_color = Self::status_color(status_success);
+        let status_label = Self::status_label(status_success);
+        lines.push(Line::from(vec![
+            Span::raw("状态 "),
+            Span::styled(status_label, Style::default().fg(status_color)),
+        ]));
+        if !message.is_empty() {
+            lines.push(Line::from(Span::styled(
+                message.as_str(),
+                Style::default().fg(status_color),
+            )));
+        }
+        lines.push(Line::from("o 关闭详情 · ↑↓/PageUp/PageDown 浏览记录"));
+        let block = Block::bordered().title(title);
+        let paragraph = Paragraph::new(lines)
+            .alignment(Alignment::Left)
+            .block(block)
+            .wrap(Wrap { trim: true });
         frame.render_widget(Clear, popup);
         frame.render_widget(paragraph, popup);
     }
@@ -1377,6 +1573,24 @@ impl TuiApp {
             style,
         ));
         Line::from(spans)
+    }
+
+    fn leverage_input_value(value: f64) -> String {
+        let mut formatted = format!("{value:.4}");
+        if let Some(dot_pos) = formatted.find('.') {
+            let mut trim_idx = formatted.len();
+            while trim_idx > dot_pos + 1 && formatted.as_bytes()[trim_idx - 1] == b'0' {
+                trim_idx -= 1;
+            }
+            if trim_idx == dot_pos + 1 {
+                trim_idx -= 1;
+            }
+            formatted.truncate(trim_idx);
+        }
+        if formatted == "-0" {
+            formatted = "0".to_string();
+        }
+        formatted
     }
     fn render_chart(&self, frame: &mut Frame, area: Rect) {
         let multi_axis_active = self.multi_axis_active();
@@ -1672,6 +1886,11 @@ impl TuiApp {
                     self.start_order_replace();
                 }
             }
+            KeyCode::Char('o') | KeyCode::Char('O') => {
+                if self.trade.focus == TradeFocus::Logs {
+                    self.trade.toggle_log_detail();
+                }
+            }
             KeyCode::PageUp => {
                 if self.trade.focus == TradeFocus::Logs {
                     self.trade.page_scroll_logs(-1);
@@ -1715,6 +1934,7 @@ impl TuiApp {
             .get(inst_idx)
             .cloned()
             .unwrap_or_else(|| "BTC-USDT-SWAP".to_string());
+        let leverage = self.trade.leverage_for_inst(&inst_id, None);
         let price = self
             .latest_prices
             .get(&inst_id)
@@ -1730,6 +1950,7 @@ impl TuiApp {
             false,
             None,
             None,
+            leverage,
         );
     }
 
@@ -1759,8 +1980,9 @@ impl TuiApp {
             OrderIntent::StopLoss => Some("sl".to_string()),
             _ => None,
         };
+        let leverage = position.lever;
         self.open_order_dialog(
-            inst_id, side, price, size, pos_side, intent, true, tag, None,
+            inst_id, side, price, size, pos_side, intent, true, tag, None, leverage,
         );
     }
 
@@ -1797,6 +2019,10 @@ impl TuiApp {
             })
             .unwrap_or_default();
         let size = Self::format_contract_size(order.size.abs());
+        let leverage = order.lever.or_else(|| {
+            self.trade
+                .leverage_for_inst(&order.inst_id, order.pos_side.as_deref())
+        });
         self.open_order_dialog(
             order.inst_id.clone(),
             side,
@@ -1807,6 +2033,7 @@ impl TuiApp {
             order.reduce_only,
             order.tag.clone(),
             Some(order.ord_id.clone()),
+            leverage,
         );
     }
 
@@ -1833,6 +2060,7 @@ impl TuiApp {
             inst_id: order.inst_id.clone(),
             ord_id: order.ord_id.clone(),
             operator: TradeOperator::Manual,
+            pos_side: order.pos_side.clone(),
         });
         match sender.try_send(request) {
             Ok(_) => {
@@ -1861,12 +2089,18 @@ impl TuiApp {
         reduce_only: bool,
         tag: Option<String>,
         replace_order_id: Option<String>,
+        initial_leverage: Option<f64>,
     ) {
+        let leverage_value = initial_leverage
+            .map(Self::leverage_input_value)
+            .unwrap_or_default();
         self.trade.input = Some(OrderInputState {
             side,
             inst_id: inst_id.clone(),
             price,
             size,
+            leverage: leverage_value,
+            initial_leverage,
             active_field: OrderInputField::Price,
             error: None,
             pos_side,
@@ -1888,11 +2122,17 @@ impl TuiApp {
                 KeyCode::Enter => {
                     self.finalize_order_input();
                 }
-                KeyCode::Tab | KeyCode::BackTab => {
-                    input.switch_field();
+                KeyCode::Tab => {
+                    input.focus_next_field();
                 }
-                KeyCode::Left | KeyCode::Right => {
-                    input.switch_field();
+                KeyCode::BackTab => {
+                    input.focus_prev_field();
+                }
+                KeyCode::Left => {
+                    input.focus_prev_field();
+                }
+                KeyCode::Right => {
+                    input.focus_next_field();
                 }
                 KeyCode::Backspace => {
                     let field = input.active_value_mut();
@@ -1913,7 +2153,7 @@ impl TuiApp {
     }
 
     fn finalize_order_input(&mut self) {
-        let (request, intent, replace_ord_id) = {
+        let (request, intent, replace_ord_id, leverage_request) = {
             let input = match self.trade.input.as_mut() {
                 Some(value) => value,
                 None => return,
@@ -1932,6 +2172,38 @@ impl TuiApp {
                     return;
                 }
             };
+            let leverage_request = {
+                let trimmed = input.leverage.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    match trimmed.parse::<f64>() {
+                        Ok(value) if value > 0.0 => {
+                            let changed = input
+                                .initial_leverage
+                                .map(|prev| (prev - value).abs() > LEVERAGE_EPSILON)
+                                .unwrap_or(true);
+                            if changed {
+                                Some(SetLeverageRequest {
+                                    inst_id: input.inst_id.clone(),
+                                    lever: value,
+                                    pos_side: input.pos_side.clone(),
+                                })
+                            } else {
+                                None
+                            }
+                        }
+                        Ok(_) => {
+                            input.error = Some("杠杆必须为正数".to_string());
+                            return;
+                        }
+                        Err(_) => {
+                            input.error = Some("杠杆格式无效".to_string());
+                            return;
+                        }
+                    }
+                }
+            };
             (
                 TradeRequest {
                     inst_id: input.inst_id.clone(),
@@ -1945,15 +2217,30 @@ impl TuiApp {
                 },
                 input.intent,
                 input.replace_order_id.clone(),
+                leverage_request,
             )
         };
         self.trade.input = None;
         if let Some(tx) = self.trade.order_sender() {
+            if let Some(leverage_req) = leverage_request {
+                match tx.try_send(TradingCommand::SetLeverage(leverage_req)) {
+                    Ok(_) => {}
+                    Err(TrySendError::Closed(_)) => {
+                        self.set_error_status_message("交易通道已关闭，无法调整杠杆");
+                        return;
+                    }
+                    Err(TrySendError::Full(_)) => {
+                        self.set_error_status_message("交易请求繁忙，请稍候再试 (调杠杆)");
+                        return;
+                    }
+                }
+            }
             if let Some(ord_id) = replace_ord_id {
                 let cancel_request = TradingCommand::Cancel(CancelOrderRequest {
                     inst_id: request.inst_id.clone(),
                     ord_id,
                     operator: TradeOperator::Manual,
+                    pos_side: request.pos_side.clone(),
                 });
                 match tx.try_send(cancel_request) {
                     Ok(_) => {}
@@ -2385,6 +2672,11 @@ fn format_columns(columns: &[(&str, ColumnAlign, usize)]) -> String {
         }
     }
     row
+}
+
+fn format_column_value(value: &str, align: ColumnAlign, width: usize) -> String {
+    let clipped = clip_to_width(value, width);
+    pad_to_width(&clipped, width, align)
 }
 
 fn clip_to_width(value: &str, width: usize) -> String {
