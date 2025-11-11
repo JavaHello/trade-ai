@@ -347,6 +347,8 @@ pub struct TuiApp {
     price_precision: HashMap<String, usize>,
     last_update: Option<String>,
     status_message: Option<String>,
+    status_visible_until: Option<Instant>,
+    status_is_error: bool,
     normalize: bool,
     y_zoom: f64,
     multi_axis: bool,
@@ -383,6 +385,8 @@ impl TuiApp {
             price_precision: HashMap::new(),
             last_update: None,
             status_message: None,
+            status_visible_until: None,
+            status_is_error: false,
             normalize: false,
             y_zoom: 1.0,
             multi_axis: false,
@@ -390,6 +394,30 @@ impl TuiApp {
             trade: TradeState::new(order_tx),
         }
     }
+
+    fn set_status_message(&mut self, message: impl Into<String>) {
+        self.status_message = Some(message.into());
+        self.status_visible_until = Some(Instant::now() + Duration::from_secs(3));
+        self.status_is_error = false;
+    }
+
+    fn set_error_status_message(&mut self, message: impl Into<String>) {
+        self.status_message = Some(message.into());
+        self.status_visible_until = Some(Instant::now() + Duration::from_secs(3));
+        self.status_is_error = true;
+    }
+
+    fn clear_status_if_allowed(&mut self) {
+        if let Some(visible_until) = self.status_visible_until {
+            if Instant::now() < visible_until {
+                return;
+            }
+        }
+        self.status_message = None;
+        self.status_visible_until = None;
+        self.status_is_error = false;
+    }
+
     pub fn dispose(&self) {
         ratatui::restore();
     }
@@ -413,7 +441,7 @@ impl TuiApp {
                 result = rx.recv() => {
                     match result {
                         Ok(Command::MarkPriceUpdate(inst_id, mark_px, ts, precision)) => {
-                            self.status_message = None;
+                            self.clear_status_if_allowed();
                             self.on_tick(&inst_id, mark_px, ts, precision);
                             if self.last_draw.elapsed() >= self.min_redraw_gap {
                                 terminal.draw(|frame| self.render(frame))?;
@@ -421,19 +449,28 @@ impl TuiApp {
                             }
                         }
                         Ok(Command::Error(message)) => {
-                            self.status_message = Some(message);
+                            self.set_error_status_message(message);
                             terminal.draw(|frame| self.render(frame))?;
                             self.last_draw = Instant::now();
                         }
                         Ok(Command::TradeResult(event)) => {
-                            let message = event.message().to_string();
-                            if let TradeEvent::Cancel(cancel) = &event {
-                                if cancel.success {
-                                    self.trade.remove_open_order(&cancel.ord_id);
+                            let (message, is_error) = match &event {
+                                TradeEvent::Order(response) => {
+                                    (response.message.to_string(), !response.success)
                                 }
-                            }
+                                TradeEvent::Cancel(cancel) => {
+                                    if cancel.success {
+                                        self.trade.remove_open_order(&cancel.ord_id);
+                                    }
+                                    (cancel.message.to_string(), !cancel.success)
+                                }
+                            };
                             self.trade.record_result(event);
-                            self.status_message = Some(message);
+                            if is_error {
+                                self.set_error_status_message(message);
+                            } else {
+                                self.set_status_message(message);
+                            }
                             terminal.draw(|frame| self.render(frame))?;
                             self.last_draw = Instant::now();
                         }
@@ -441,7 +478,7 @@ impl TuiApp {
                             let positions = snapshot.positions.len();
                             let orders = snapshot.open_orders.len();
                             self.trade.update_snapshot(snapshot, &self.inst_ids);
-                            self.status_message = Some(format!(
+                            self.set_status_message(format!(
                                 "已同步 OKX 持仓 {} 条，挂单 {} 条",
                                 positions, orders
                             ));
@@ -469,7 +506,7 @@ impl TuiApp {
         for point in sorted {
             self.on_tick(&point.inst_id, point.mark_px, point.ts, point.precision);
         }
-        self.status_message = Some(format!("Loaded {} historical points", points.len()));
+        self.set_status_message(format!("Loaded {} historical points", points.len()));
     }
     fn on_tick(&mut self, inst_id: &str, mark_px: f64, ts: i64, precision: usize) {
         if !self.inst_ids.iter().any(|id| id == inst_id) {
@@ -1343,11 +1380,11 @@ impl TuiApp {
             KeyCode::Char('t') | KeyCode::Char('T') => {
                 self.view_mode = match self.view_mode {
                     ViewMode::Chart => {
-                        self.status_message = Some("进入交易页面 (T)".to_string());
+                        self.set_status_message("进入交易页面 (T)");
                         ViewMode::Trade
                     }
                     ViewMode::Trade => {
-                        self.status_message = Some("返回图表页面 (T)".to_string());
+                        self.set_status_message("返回图表页面 (T)");
                         ViewMode::Chart
                     }
                 };
@@ -1365,7 +1402,7 @@ impl TuiApp {
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 self.normalize = !self.normalize;
                 self.y_zoom = 1.0;
-                self.status_message = Some(match (self.normalize, self.multi_axis) {
+                self.set_status_message(match (self.normalize, self.multi_axis) {
                     (true, true) => {
                         "Relative change mode enabled; multi Y resumes once you exit (N)"
                             .to_string()
@@ -1380,7 +1417,7 @@ impl TuiApp {
             KeyCode::Char('m') | KeyCode::Char('M') => {
                 self.multi_axis = !self.multi_axis;
                 self.y_zoom = 1.0;
-                self.status_message = Some(match (self.multi_axis, self.normalize) {
+                self.set_status_message(match (self.multi_axis, self.normalize) {
                     (true, true) => {
                         "Multi Y axis pre-enabled; activates once you leave relative mode (M)"
                             .to_string()
@@ -1394,15 +1431,15 @@ impl TuiApp {
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.y_zoom = (self.y_zoom * 1.25).min(100.0);
-                self.status_message = Some(format!("Zoomed in Y axis (Zoom {:.2}x)", self.y_zoom));
+                self.set_status_message(format!("Zoomed in Y axis (Zoom {:.2}x)", self.y_zoom));
             }
             KeyCode::Char('-') => {
                 self.y_zoom = (self.y_zoom / 1.25).max(0.05);
-                self.status_message = Some(format!("Zoomed out Y axis (Zoom {:.2}x)", self.y_zoom));
+                self.set_status_message(format!("Zoomed out Y axis (Zoom {:.2}x)", self.y_zoom));
             }
             KeyCode::Char('0') => {
                 self.y_zoom = 1.0;
-                self.status_message = Some("Reset Y axis (0)".to_string());
+                self.set_status_message("Reset Y axis (0)");
             }
             _ => {}
         }
@@ -1412,12 +1449,11 @@ impl TuiApp {
         match key.code {
             KeyCode::Tab => {
                 self.trade.cycle_focus(false);
-                self.status_message =
-                    Some(format!("焦点切换至 {} (Tab)", self.trade.focus_label()));
+                self.set_status_message(format!("焦点切换至 {} (Tab)", self.trade.focus_label()));
             }
             KeyCode::BackTab => {
                 self.trade.cycle_focus(true);
-                self.status_message = Some(format!(
+                self.set_status_message(format!(
                     "焦点切换至 {} (Shift+Tab)",
                     self.trade.focus_label()
                 ));
@@ -1460,11 +1496,11 @@ impl TuiApp {
 
     fn start_order_entry(&mut self, side: TradeSide) {
         if !self.trade.trading_enabled() {
-            self.status_message = Some("未配置 OKX API，无法下单".to_string());
+            self.set_error_status_message("未配置 OKX API，无法下单");
             return;
         }
         if self.inst_ids.is_empty() {
-            self.status_message = Some("暂无可交易的合约".to_string());
+            self.set_error_status_message("暂无可交易的合约");
             return;
         }
         self.trade.ensure_selection(&self.inst_ids);
@@ -1497,13 +1533,13 @@ impl TuiApp {
 
     fn start_position_close(&mut self, intent: OrderIntent) {
         if !self.trade.trading_enabled() {
-            self.status_message = Some("未配置 OKX API，无法下单".to_string());
+            self.set_error_status_message("未配置 OKX API，无法下单");
             return;
         }
         let position = match self.trade.selected_position() {
             Some(position) => position.clone(),
             None => {
-                self.status_message = Some("当前无可操作的持仓".to_string());
+                self.set_error_status_message("当前无可操作的持仓");
                 return;
             }
         };
@@ -1528,24 +1564,24 @@ impl TuiApp {
 
     fn start_order_replace(&mut self) {
         if !self.trade.trading_enabled() {
-            self.status_message = Some("未配置 OKX API，无法改单".to_string());
+            self.set_error_status_message("未配置 OKX API，无法改单");
             return;
         }
         if self.trade.focus != TradeFocus::Orders {
-            self.status_message = Some("请先切换焦点到挂单列表".to_string());
+            self.set_error_status_message("请先切换焦点到挂单列表");
             return;
         }
         let order = match self.trade.selected_order() {
             Some(order) => order.clone(),
             None => {
-                self.status_message = Some("当前无挂单可改单".to_string());
+                self.set_error_status_message("当前无挂单可改单");
                 return;
             }
         };
         let side = match Self::parse_order_side(order.side.as_str()) {
             Some(side) => side,
             None => {
-                self.status_message = Some("无法识别挂单方向，暂不支持改单".to_string());
+                self.set_error_status_message("无法识别挂单方向，暂不支持改单");
                 return;
             }
         };
@@ -1574,20 +1610,20 @@ impl TuiApp {
 
     fn cancel_selected_order(&mut self) {
         if !self.trade.trading_enabled() {
-            self.status_message = Some("未配置 OKX API，无法撤单".to_string());
+            self.set_error_status_message("未配置 OKX API，无法撤单");
             return;
         }
         let order = match self.trade.selected_order() {
             Some(order) => order.clone(),
             None => {
-                self.status_message = Some("当前无挂单可撤".to_string());
+                self.set_error_status_message("当前无挂单可撤");
                 return;
             }
         };
         let sender = match self.trade.order_sender() {
             Some(sender) => sender,
             None => {
-                self.status_message = Some("交易通道不可用".to_string());
+                self.set_error_status_message("交易通道不可用");
                 return;
             }
         };
@@ -1597,16 +1633,16 @@ impl TuiApp {
         });
         match sender.try_send(request) {
             Ok(_) => {
-                self.status_message = Some(format!(
+                self.set_status_message(format!(
                     "已提交撤单请求 {}",
                     Self::short_order_id(&order.ord_id)
                 ));
             }
             Err(TrySendError::Closed(_)) => {
-                self.status_message = Some("交易通道已关闭".to_string());
+                self.set_error_status_message("交易通道已关闭");
             }
             Err(TrySendError::Full(_)) => {
-                self.status_message = Some("交易请求过多，请稍后再试".to_string());
+                self.set_error_status_message("交易请求过多，请稍后再试");
             }
         }
     }
@@ -1647,7 +1683,7 @@ impl TuiApp {
         if let Some(ord_id) = replace_hint {
             status.push_str(&format!(" · 原单 {}", Self::short_order_id(&ord_id)));
         }
-        self.status_message = Some(status);
+        self.set_status_message(status);
     }
 
     fn handle_order_input_key(&mut self, key: KeyEvent) {
@@ -1655,7 +1691,7 @@ impl TuiApp {
             match key.code {
                 KeyCode::Esc => {
                     self.trade.input = None;
-                    self.status_message = Some("已取消下单".to_string());
+                    self.set_status_message("已取消下单");
                 }
                 KeyCode::Enter => {
                     self.finalize_order_input();
@@ -1728,12 +1764,11 @@ impl TuiApp {
                 match tx.try_send(cancel_request) {
                     Ok(_) => {}
                     Err(TrySendError::Full(_)) => {
-                        self.status_message =
-                            Some("交易请求繁忙，请稍候再试 (改单取消)".to_string());
+                        self.set_error_status_message("交易请求繁忙，请稍候再试 (改单取消)");
                         return;
                     }
                     Err(TrySendError::Closed(_)) => {
-                        self.status_message = Some("交易通道已关闭，无法提交改单请求".to_string());
+                        self.set_error_status_message("交易通道已关闭，无法提交改单请求");
                         return;
                     }
                 }
@@ -1742,7 +1777,7 @@ impl TuiApp {
                 Ok(_) => {
                     let price_fmt = self.format_price_for(&request.inst_id, request.price);
                     let size_fmt = Self::format_contract_size(request.size);
-                    self.status_message = Some(format!(
+                    self.set_status_message(format!(
                         "{} 已发送{} {} {} @ {}",
                         intent.action_label(),
                         Self::side_label(request.side),
@@ -1752,14 +1787,14 @@ impl TuiApp {
                     ));
                 }
                 Err(TrySendError::Full(_)) => {
-                    self.status_message = Some("交易请求繁忙，请稍候重试".to_string());
+                    self.set_error_status_message("交易请求繁忙，请稍候重试");
                 }
                 Err(TrySendError::Closed(_)) => {
-                    self.status_message = Some("交易通道已关闭，无法下单".to_string());
+                    self.set_error_status_message("交易通道已关闭，无法下单");
                 }
             }
         } else {
-            self.status_message = Some("未配置 OKX API，无法下单".to_string());
+            self.set_error_status_message("未配置 OKX API，无法下单");
         }
     }
 
@@ -1845,9 +1880,14 @@ impl TuiApp {
     }
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         if let Some(message) = &self.status_message {
+            let color = if self.status_is_error {
+                Color::Red
+            } else {
+                Color::Yellow
+            };
             let block = Block::bordered().title("Status");
             let status = Paragraph::new(message.as_str())
-                .style(Style::default().fg(Color::Yellow))
+                .style(Style::default().fg(color))
                 .alignment(Alignment::Left)
                 .block(block);
             frame.render_widget(status, area);

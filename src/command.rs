@@ -59,15 +59,6 @@ pub enum TradeEvent {
     Cancel(CancelResponse),
 }
 
-impl TradeEvent {
-    pub fn message(&self) -> &str {
-        match self {
-            TradeEvent::Order(response) => response.message.as_str(),
-            TradeEvent::Cancel(response) => response.message.as_str(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum TradingCommand {
     Place(TradeRequest),
