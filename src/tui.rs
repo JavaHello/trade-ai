@@ -539,6 +539,7 @@ pub struct TuiApp {
     multi_axis: bool,
     view_mode: ViewMode,
     trade: TradeState,
+    exit_confirmation: bool,
 }
 impl TuiApp {
     pub fn new(
@@ -578,6 +579,7 @@ impl TuiApp {
             multi_axis: false,
             view_mode: ViewMode::Chart,
             trade: TradeState::new(order_tx, Some(log_store)),
+            exit_confirmation: false,
         }
     }
 
@@ -746,6 +748,9 @@ impl TuiApp {
             ViewMode::Chart => self.render_chart_view(frame),
             ViewMode::Trade => self.render_trade_view(frame),
         }
+        if self.exit_confirmation {
+            self.render_exit_confirmation(frame);
+        }
     }
 
     fn render_chart_view(&self, frame: &mut Frame) {
@@ -789,6 +794,33 @@ impl TuiApp {
         if let Some(detail) = &self.trade.log_detail {
             self.render_log_detail(frame, main_area, detail);
         }
+    }
+
+    fn render_exit_confirmation(&self, frame: &mut Frame) {
+        let area = frame.area();
+        if area.width < 24 || area.height < 5 {
+            return;
+        }
+        let popup_width = area.width.saturating_sub(20).min(50).max(28);
+        let popup_height = 6;
+        let left = area.x + (area.width.saturating_sub(popup_width)) / 2;
+        let top = area.y + (area.height.saturating_sub(popup_height)) / 2;
+        let popup = Rect::new(left, top, popup_width, popup_height);
+        let lines = vec![
+            Line::from(Span::styled(
+                "确定要退出交易终端？",
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("Y/Enter 确认退出 · N/Esc 取消"),
+            Line::from("再次按 q/Q 也可确认 · Ctrl+C 立即退出"),
+        ];
+        let paragraph = Paragraph::new(lines)
+            .alignment(Alignment::Left)
+            .block(Block::bordered().title("确认退出"));
+        frame.render_widget(Clear, popup);
+        frame.render_widget(paragraph, popup);
     }
 
     fn render_trade_panel(&mut self, frame: &mut Frame, area: Rect) {
@@ -1754,9 +1786,13 @@ impl TuiApp {
     }
 
     fn handle_key_event(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.exit_confirmation {
+            return self.handle_exit_confirmation_key(key);
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             if let KeyCode::Char('c') = key.code {
-                return Ok(true);
+                self.prompt_exit_confirmation();
+                return Ok(false);
             }
         }
         if self.trade.input.is_some() {
@@ -1765,7 +1801,7 @@ impl TuiApp {
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
-                return Ok(true);
+                self.prompt_exit_confirmation();
             }
             KeyCode::Char('t') | KeyCode::Char('T') => {
                 self.view_mode = match self.view_mode {
@@ -1785,6 +1821,39 @@ impl TuiApp {
             },
         }
         Ok(false)
+    }
+
+    fn prompt_exit_confirmation(&mut self) {
+        if self.exit_confirmation {
+            return;
+        }
+        self.exit_confirmation = true;
+        self.set_status_message("确认退出？Y/Enter 确认 · N/Esc 取消");
+    }
+
+    fn handle_exit_confirmation_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let KeyCode::Char('c') = key.code {
+                self.exit_confirmation = false;
+                return Ok(true);
+            }
+        }
+        match key.code {
+            KeyCode::Char('y')
+            | KeyCode::Char('Y')
+            | KeyCode::Char('q')
+            | KeyCode::Char('Q')
+            | KeyCode::Enter => {
+                self.exit_confirmation = false;
+                Ok(true)
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.exit_confirmation = false;
+                self.set_status_message("已取消退出");
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn handle_chart_key(&mut self, key: KeyEvent) {
