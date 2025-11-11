@@ -407,6 +407,12 @@ impl TuiApp {
         self.status_is_error = true;
     }
 
+    fn clear_status_message(&mut self) {
+        self.status_message = None;
+        self.status_visible_until = None;
+        self.status_is_error = false;
+    }
+
     fn clear_status_if_allowed(&mut self) {
         if let Some(visible_until) = self.status_visible_until {
             if Instant::now() < visible_until {
@@ -585,25 +591,30 @@ impl TuiApp {
         if area.height < 4 || area.width < 20 {
             return;
         }
-        let show_snapshot = area.height >= 10;
+        let instruction_lines = self.trade_instruction_lines();
+        let header_height = Self::trade_header_height(instruction_lines.len());
+        if area.height < header_height {
+            return;
+        }
+        let show_snapshot = area.height >= header_height + 6;
         if show_snapshot {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(4),
+                    Constraint::Length(header_height),
                     Constraint::Length(6),
                     Constraint::Min(4),
                 ])
                 .split(area);
-            self.render_trade_header(frame, chunks[0]);
+            self.render_trade_header(frame, chunks[0], &instruction_lines);
             self.render_account_snapshot(frame, chunks[1]);
             self.render_trade_activity(frame, chunks[2]);
         } else {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(4), Constraint::Min(4)])
+                .constraints([Constraint::Length(header_height), Constraint::Min(4)])
                 .split(area);
-            self.render_trade_header(frame, chunks[0]);
+            self.render_trade_header(frame, chunks[0], &instruction_lines);
             self.render_trade_activity(frame, chunks[1]);
         }
     }
@@ -751,7 +762,12 @@ impl TuiApp {
         frame.render_widget(paragraph, area);
     }
 
-    fn render_trade_header(&self, frame: &mut Frame, area: Rect) {
+    fn render_trade_header(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        instruction_lines: &[String],
+    ) {
         let inst = self
             .trade
             .selected_inst(&self.inst_ids)
@@ -764,15 +780,6 @@ impl TuiApp {
             .map(|value| self.format_price_for(&inst, *value))
             .unwrap_or_else(|| "--".to_string());
         let focus_label = self.trade.focus_label();
-        let instructions = if self.trade.trading_enabled() {
-            let (pos_cnt, ord_cnt) = self.trade.snapshot_counts();
-            format!(
-                "焦点 {} · Tab 切换 · ↑↓ 浏览 · b 买入 · s 卖出 · p 止盈 · l 止损 · c 撤单 · r 改单 · 持仓 {} · 挂单 {} · t 返回图表",
-                focus_label, pos_cnt, ord_cnt
-            )
-        } else {
-            "未配置 OKX API，仅显示行情（t 返回图表）".to_string()
-        };
         let lines = vec![
             Line::from(vec![
                 Span::styled(
@@ -793,13 +800,54 @@ impl TuiApp {
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
-            Line::from(instructions),
         ];
+        let mut lines = lines;
+        lines.extend(
+            instruction_lines
+                .iter()
+                .map(|line| Line::from(line.as_str())),
+        );
         let block = Block::bordered().title("Trade");
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
             .block(block);
         frame.render_widget(paragraph, area);
+    }
+
+    fn trade_instruction_lines(&self) -> Vec<String> {
+        let mut instruction_lines = Vec::new();
+        if self.trade.trading_enabled() {
+            let (pos_cnt, ord_cnt) = self.trade.snapshot_counts();
+            instruction_lines.push(format!(
+                "Tab 切换 · Shift+Tab 返回 · ↑↓ 浏览 · 持仓 {} · 挂单 {} · t 返回图表",
+                pos_cnt, ord_cnt
+            ));
+            if let Some(focus_hint) = self.focus_shortcut_hint() {
+                instruction_lines.push(focus_hint);
+            }
+        } else {
+            instruction_lines
+                .push("未配置 OKX API，仅显示行情 · Tab 切换 · ↑↓ 浏览 · t 返回图表".to_string());
+        }
+        instruction_lines
+    }
+
+    fn trade_header_height(line_count: usize) -> u16 {
+        let content_lines = 1 + line_count;
+        let needed = content_lines as u16 + 2; // account for borders
+        needed.max(4)
+    }
+
+    fn focus_shortcut_hint(&self) -> Option<String> {
+        if !self.trade.trading_enabled() {
+            return None;
+        }
+        let hint = match self.trade.focus {
+            TradeFocus::Instruments => "焦点 合约：↑↓ 选择合约 · b 买入 · s 卖出",
+            TradeFocus::Positions => "焦点 持仓：↑↓ 选择持仓 · p 止盈 · l 止损",
+            TradeFocus::Orders => "焦点 挂单：↑↓ 选择挂单 · c 撤单 · r 改单",
+        };
+        Some(hint.to_string())
     }
 
     fn render_trade_activity(&self, frame: &mut Frame, area: Rect) {
@@ -1659,7 +1707,6 @@ impl TuiApp {
         tag: Option<String>,
         replace_order_id: Option<String>,
     ) {
-        let replace_hint = replace_order_id.clone();
         self.trade.input = Some(OrderInputState {
             side,
             inst_id: inst_id.clone(),
@@ -1673,17 +1720,7 @@ impl TuiApp {
             tag,
             replace_order_id,
         });
-        let action = intent.action_label();
-        let mut status = format!(
-            "{} {} {} (Enter 提交)",
-            action,
-            Self::side_label(side),
-            inst_id
-        );
-        if let Some(ord_id) = replace_hint {
-            status.push_str(&format!(" · 原单 {}", Self::short_order_id(&ord_id)));
-        }
-        self.set_status_message(status);
+        self.clear_status_message();
     }
 
     fn handle_order_input_key(&mut self, key: KeyEvent) {
