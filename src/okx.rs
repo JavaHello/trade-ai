@@ -1,12 +1,23 @@
+use std::collections::{HashMap, HashSet};
+
 use anyhow::{Context, anyhow};
-use chrono::Utc;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use chrono::{SecondsFormat, Utc};
 use futures_util::{SinkExt, StreamExt};
+use hmac::{Hmac, Mac};
 use reqwest::{Client, ClientBuilder};
 use reqwest_websocket::{Message, RequestBuilderExt, WebSocket};
-use tokio::sync::broadcast;
+use serde::de::DeserializeOwned;
+use sha2::Sha256;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::{Duration, sleep};
 
-use crate::command::{Command, PricePoint};
+use crate::command::{
+    AccountSnapshot, CancelOrderRequest, CancelResponse, Command, PendingOrderInfo, PositionInfo,
+    PricePoint, TradeEvent, TradeRequest, TradeResponse, TradeSide, TradingCommand,
+};
+use crate::config::TradingConfig;
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,9 +59,28 @@ pub struct OkxWsClient {
     tx: broadcast::Sender<Command>,
 }
 
+pub struct OkxTradingClient {
+    client: Client,
+    tx: broadcast::Sender<Command>,
+    config: TradingConfig,
+}
+
+pub struct OkxPrivateWsClient {
+    client: Client,
+    tx: broadcast::Sender<Command>,
+    config: TradingConfig,
+}
+
 const PUBLIC_WS_ENDPOINT: &str = "wss://ws.okx.com:8443/ws/v5/public";
+const PRIVATE_WS_ENDPOINT: &str = "wss://ws.okx.com:8443/ws/v5/private";
+const OKX_API_BASE: &str = "https://www.okx.com";
 const MARK_PRICE_CANDLES_ENDPOINT: &str = "https://www.okx.com/api/v5/market/mark-price-candles";
+const TRADE_ORDER_ENDPOINT: &str = "/api/v5/trade/order";
+const CANCEL_ORDER_ENDPOINT: &str = "/api/v5/trade/cancel-order";
+const POSITIONS_ENDPOINT: &str = "/api/v5/account/positions";
+const ORDERS_PENDING_ENDPOINT: &str = "/api/v5/trade/orders-pending";
 const MAX_CANDLE_LIMIT: usize = 300;
+type HmacSha256 = Hmac<Sha256>;
 const BAR_OPTIONS: &[(u64, &str)] = &[
     (60, "1m"),
     (180, "3m"),
@@ -160,6 +190,617 @@ impl OkxWsClient {
             backoff = (backoff * 2).min(max_backoff);
         }
     }
+}
+
+impl OkxTradingClient {
+    pub fn new(
+        config: TradingConfig,
+        tx: broadcast::Sender<Command>,
+    ) -> Result<Self, anyhow::Error> {
+        Ok(OkxTradingClient {
+            client: build_http_client()?,
+            tx,
+            config,
+        })
+    }
+
+    pub async fn run(self, mut rx: mpsc::Receiver<TradingCommand>) -> Result<(), anyhow::Error> {
+        while let Some(command) = rx.recv().await {
+            match command {
+                TradingCommand::Place(request) => {
+                    let response = match self.place_order(&request).await {
+                        Ok(result) => result,
+                        Err(err) => TradeResponse {
+                            inst_id: request.inst_id.clone(),
+                            side: request.side,
+                            price: request.price,
+                            size: request.size,
+                            order_id: None,
+                            message: format!("OKX 下单失败: {err}"),
+                            success: false,
+                        },
+                    };
+                    let _ = self
+                        .tx
+                        .send(Command::TradeResult(TradeEvent::Order(response)));
+                }
+                TradingCommand::Cancel(request) => {
+                    let response = match self.cancel_order(&request).await {
+                        Ok(result) => result,
+                        Err(err) => CancelResponse {
+                            inst_id: request.inst_id.clone(),
+                            ord_id: request.ord_id.clone(),
+                            message: format!("OKX 撤单失败: {err}"),
+                            success: false,
+                        },
+                    };
+                    let _ = self
+                        .tx
+                        .send(Command::TradeResult(TradeEvent::Cancel(response)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn place_order(&self, request: &TradeRequest) -> Result<TradeResponse, anyhow::Error> {
+        let payload = TradeOrderRequest::from_request(request, &self.config.td_mode);
+        let body = serde_json::to_string(&payload)?;
+        let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let signature = sign_payload(
+            &self.config.api_secret,
+            &timestamp,
+            "POST",
+            TRADE_ORDER_ENDPOINT,
+            &body,
+        )?;
+        let response = self
+            .client
+            .post(format!("{OKX_API_BASE}{TRADE_ORDER_ENDPOINT}"))
+            .header("OK-ACCESS-KEY", &self.config.api_key)
+            .header("OK-ACCESS-PASSPHRASE", &self.config.passphrase)
+            .header("OK-ACCESS-TIMESTAMP", &timestamp)
+            .header("OK-ACCESS-SIGN", signature)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .with_context(|| "sending order to OKX")?
+            .error_for_status()
+            .with_context(|| "OKX returned non-success status")?
+            .json::<TradeOrderResponse>()
+            .await
+            .with_context(|| "decoding OKX order response")?;
+        Ok(build_trade_response(request, response))
+    }
+
+    async fn cancel_order(
+        &self,
+        request: &CancelOrderRequest,
+    ) -> Result<CancelResponse, anyhow::Error> {
+        let payload = CancelOrderPayload::from_request(request);
+        let body = serde_json::to_string(&payload)?;
+        let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let signature = sign_payload(
+            &self.config.api_secret,
+            &timestamp,
+            "POST",
+            CANCEL_ORDER_ENDPOINT,
+            &body,
+        )?;
+        let response = self
+            .client
+            .post(format!("{OKX_API_BASE}{CANCEL_ORDER_ENDPOINT}"))
+            .header("OK-ACCESS-KEY", &self.config.api_key)
+            .header("OK-ACCESS-PASSPHRASE", &self.config.passphrase)
+            .header("OK-ACCESS-TIMESTAMP", &timestamp)
+            .header("OK-ACCESS-SIGN", signature)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .with_context(|| "sending cancel to OKX")?
+            .error_for_status()
+            .with_context(|| "OKX returned non-success status for cancel")?
+            .json::<CancelOrderResponse>()
+            .await
+            .with_context(|| "decoding OKX cancel response")?;
+        Ok(build_cancel_response(request, response))
+    }
+}
+
+impl OkxPrivateWsClient {
+    pub fn new(
+        config: TradingConfig,
+        tx: broadcast::Sender<Command>,
+    ) -> Result<Self, anyhow::Error> {
+        Ok(OkxPrivateWsClient {
+            client: build_http_client()?,
+            tx,
+            config,
+        })
+    }
+
+    fn emit_error(&self, message: impl Into<String>) {
+        let _ = self.tx.send(Command::Error(message.into()));
+    }
+
+    async fn connect(&self) -> Result<WebSocket, anyhow::Error> {
+        let response = self
+            .client
+            .get(PRIVATE_WS_ENDPOINT)
+            .upgrade()
+            .send()
+            .await
+            .with_context(|| "connecting to OKX private websocket")?;
+        Ok(response.into_websocket().await?)
+    }
+
+    pub async fn stream_account(&self, inst_ids: &[String]) -> Result<(), anyhow::Error> {
+        let filter = inst_filter(inst_ids);
+        let mut backoff = Duration::from_secs(1);
+        let max_backoff = Duration::from_secs(32);
+        loop {
+            match self.connect().await {
+                Ok(websocket) => {
+                    backoff = Duration::from_secs(1);
+                    if let Err(err) = self
+                        .run_private_stream(websocket, filter.clone())
+                        .await
+                        .context("account stream closed")
+                    {
+                        self.emit_error(format!("okx private ws error: {err}"));
+                    } else {
+                        backoff = Duration::from_secs(1);
+                    }
+                }
+                Err(err) => {
+                    self.emit_error(format!("failed to connect okx private ws: {err}"));
+                }
+            }
+            sleep(backoff).await;
+            backoff = (backoff * 2).min(max_backoff);
+        }
+    }
+
+    async fn run_private_stream(
+        &self,
+        websocket: WebSocket,
+        filter: Option<HashSet<String>>,
+    ) -> Result<(), anyhow::Error> {
+        let (mut ws_tx, mut ws_rx) = websocket.split();
+        self.send_login(&mut ws_tx).await?;
+        self.wait_for_login(&mut ws_tx, &mut ws_rx).await?;
+        self.subscribe_private(&mut ws_tx).await?;
+        let mut state = AccountState::new(filter);
+        while let Some(result) = ws_rx.next().await {
+            match result {
+                Ok(Message::Text(text)) => {
+                    self.handle_private_text(&text, &mut state)?;
+                }
+                Ok(Message::Ping(payload)) => {
+                    ws_tx.send(Message::Pong(payload)).await?;
+                }
+                Ok(Message::Close { code, reason }) => {
+                    return Err(anyhow!(
+                        "private websocket closed by server: code={code}, reason={reason:?}"
+                    ));
+                }
+                Ok(Message::Pong(_)) | Ok(Message::Binary(_)) => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Err(anyhow!("private websocket closed"))
+    }
+
+    async fn send_login(
+        &self,
+        ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    ) -> Result<(), anyhow::Error> {
+        let timestamp = current_ws_timestamp();
+        let sign = sign_payload(
+            &self.config.api_secret,
+            &timestamp,
+            "GET",
+            "/users/self/verify",
+            "",
+        )?;
+        let login = LoginRequest {
+            op: "login".to_string(),
+            args: vec![LoginArgs {
+                api_key: self.config.api_key.clone(),
+                passphrase: self.config.passphrase.clone(),
+                timestamp,
+                sign,
+            }],
+        };
+        let payload = serde_json::to_string(&login)?;
+        ws_tx
+            .send(Message::Text(payload))
+            .await
+            .with_context(|| "sending login payload to OKX")?;
+        Ok(())
+    }
+
+    async fn wait_for_login(
+        &self,
+        ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+        ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
+    ) -> Result<(), anyhow::Error> {
+        loop {
+            match ws_rx.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    if let Some(event) = parse_ws_event(&text) {
+                        if event.event == "login" {
+                            if event.code == "0" {
+                                return Ok(());
+                            } else {
+                                return Err(anyhow!(
+                                    "okx private ws login failed (code {}): {}",
+                                    event.code,
+                                    event.msg
+                                ));
+                            }
+                        } else if event.event == "error" {
+                            self.emit_error(format!(
+                                "okx private ws event error (code {}): {}",
+                                event.code, event.msg
+                            ));
+                        }
+                    }
+                }
+                Some(Ok(Message::Ping(payload))) => {
+                    ws_tx.send(Message::Pong(payload)).await?;
+                }
+                Some(Ok(Message::Close { code, reason })) => {
+                    return Err(anyhow!(
+                        "private websocket closed during login: code={code}, reason={reason:?}"
+                    ));
+                }
+                Some(Ok(Message::Binary(_))) | Some(Ok(Message::Pong(_))) => {}
+                Some(Err(err)) => return Err(err.into()),
+                None => return Err(anyhow!("private websocket closed before login ack")),
+            }
+        }
+    }
+
+    async fn subscribe_private(
+        &self,
+        ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    ) -> Result<(), anyhow::Error> {
+        let args = vec![
+            PrivateSubscribeArg {
+                channel: "positions".to_string(),
+                inst_type: Some("ANY".to_string()),
+            },
+            PrivateSubscribeArg {
+                channel: "orders".to_string(),
+                inst_type: Some("ANY".to_string()),
+            },
+        ];
+        let payload = serde_json::to_string(&PrivateSubscribeMessage {
+            id: None,
+            op: "subscribe".to_string(),
+            args,
+        })?;
+        ws_tx
+            .send(Message::Text(payload))
+            .await
+            .with_context(|| "subscribing to private channels")?;
+        Ok(())
+    }
+
+    fn handle_private_text(
+        &self,
+        text: &str,
+        state: &mut AccountState,
+    ) -> Result<(), anyhow::Error> {
+        let value: serde_json::Value = match serde_json::from_str(text) {
+            Ok(val) => val,
+            Err(err) => {
+                self.emit_error(format!("invalid private ws payload: {err}"));
+                return Ok(());
+            }
+        };
+        if let Some(event) = value.get("event") {
+            if event.is_string() {
+                if let Ok(msg) = serde_json::from_value::<WsEventMessage>(value) {
+                    self.handle_event(msg)?;
+                }
+            }
+            return Ok(());
+        }
+        let channel = value
+            .get("arg")
+            .and_then(|arg| arg.get("channel"))
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string());
+        let Some(channel) = channel else {
+            return Ok(());
+        };
+        match channel.as_str() {
+            "positions" => {
+                let message: PrivateDataMessage<WsPositionEntry> = serde_json::from_value(value)?;
+                if state.update_positions(&message.data) {
+                    let snapshot = state.snapshot();
+                    let _ = self.tx.send(Command::AccountSnapshot(snapshot));
+                }
+            }
+            "orders" => {
+                let message: PrivateDataMessage<WsOrderEntry> = serde_json::from_value(value)?;
+                if state.update_orders(&message.data) {
+                    let snapshot = state.snapshot();
+                    let _ = self.tx.send(Command::AccountSnapshot(snapshot));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_event(&self, event: WsEventMessage) -> Result<(), anyhow::Error> {
+        match event.event.as_str() {
+            "login" => {
+                if event.code != "0" {
+                    return Err(anyhow!(
+                        "okx private ws login failed (code {}): {}",
+                        event.code,
+                        event.msg
+                    ));
+                }
+            }
+            "error" => {
+                self.emit_error(format!(
+                    "okx private ws error (code {}): {}",
+                    event.code, event.msg
+                ));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+fn build_trade_response(request: &TradeRequest, response: TradeOrderResponse) -> TradeResponse {
+    let mut success = response.code == "0";
+    let mut message = if response.msg.is_empty() {
+        String::new()
+    } else {
+        response.msg
+    };
+    let mut order_id = None;
+
+    for entry in &response.data {
+        if order_id.is_none() {
+            order_id = Some(entry.ord_id.clone());
+        }
+        if entry.s_code != "0" {
+            success = false;
+            if !entry.s_msg.is_empty() {
+                message = entry.s_msg.clone();
+            }
+        }
+    }
+
+    if success {
+        let side = request.side.as_okx_side().to_uppercase();
+        message = match &order_id {
+            Some(ord_id) => format!(
+                "OKX 已提交订单 {ord_id} {side} {} {:.4} @ {:.4}",
+                request.inst_id, request.size, request.price
+            ),
+            None => format!(
+                "OKX 已提交 {side} {} {:.4} @ {:.4}",
+                request.inst_id, request.size, request.price
+            ),
+        };
+    } else if message.is_empty() {
+        message = "OKX 下单失败".to_string();
+    }
+
+    TradeResponse {
+        inst_id: request.inst_id.clone(),
+        side: request.side,
+        price: request.price,
+        size: request.size,
+        order_id,
+        message,
+        success,
+    }
+}
+
+fn build_cancel_response(
+    request: &CancelOrderRequest,
+    response: CancelOrderResponse,
+) -> CancelResponse {
+    let mut success = response.code == "0";
+    let mut message = if response.msg.is_empty() {
+        String::new()
+    } else {
+        response.msg
+    };
+    let mut ord_id = request.ord_id.clone();
+    let mut inst_id = request.inst_id.clone();
+
+    for entry in response.data {
+        if let Some(inst) = entry.inst_id {
+            if !inst.is_empty() {
+                inst_id = inst;
+            }
+        }
+        if !entry.ord_id.is_empty() {
+            ord_id = entry.ord_id.clone();
+        }
+        if entry.s_code != "0" {
+            success = false;
+            if !entry.s_msg.is_empty() {
+                message = entry.s_msg.clone();
+            }
+        }
+    }
+
+    if success {
+        message = format!("OKX 已取消订单 {ord_id}");
+    } else if message.is_empty() {
+        message = format!("OKX 撤单失败 {ord_id}");
+    }
+
+    CancelResponse {
+        inst_id,
+        ord_id,
+        message,
+        success,
+    }
+}
+
+fn sign_payload(
+    secret: &str,
+    timestamp: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> Result<String, anyhow::Error> {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|err| anyhow!("invalid OKX secret key: {err}"))?;
+    let payload = format!("{timestamp}{method}{path}{body}");
+    mac.update(payload.as_bytes());
+    Ok(BASE64.encode(mac.finalize().into_bytes()))
+}
+
+fn format_float(value: f64) -> String {
+    let mut repr = format!("{value:.8}");
+    while repr.contains('.') && repr.ends_with('0') {
+        repr.pop();
+    }
+    if repr.ends_with('.') {
+        repr.push('0');
+    }
+    repr
+}
+
+fn pos_side_for(inst_id: &str, side: TradeSide) -> Option<&'static str> {
+    let upper = inst_id.to_ascii_uppercase();
+    if upper.ends_with("-SWAP") || upper.ends_with("-FUTURES") {
+        return Some(match side {
+            TradeSide::Buy => "long",
+            TradeSide::Sell => "short",
+        });
+    }
+    None
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TradeOrderRequest {
+    inst_id: String,
+    td_mode: String,
+    side: String,
+    ord_type: String,
+    sz: String,
+    px: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pos_side: Option<String>,
+}
+
+impl TradeOrderRequest {
+    fn from_request(request: &TradeRequest, td_mode: &str) -> Self {
+        TradeOrderRequest {
+            inst_id: request.inst_id.clone(),
+            td_mode: td_mode.to_string(),
+            side: request.side.as_okx_side().to_string(),
+            ord_type: "limit".to_string(),
+            sz: format_float(request.size),
+            px: format_float(request.price),
+            pos_side: request
+                .pos_side
+                .clone()
+                .or_else(|| pos_side_for(&request.inst_id, request.side).map(|s| s.to_string())),
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelOrderPayload {
+    inst_id: String,
+    ord_id: String,
+}
+
+impl CancelOrderPayload {
+    fn from_request(request: &CancelOrderRequest) -> Self {
+        CancelOrderPayload {
+            inst_id: request.inst_id.clone(),
+            ord_id: request.ord_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TradeOrderResponse {
+    code: String,
+    msg: String,
+    data: Vec<TradeOrderResponseData>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TradeOrderResponseData {
+    ord_id: String,
+    #[serde(rename = "clOrdId", default)]
+    _cl_ord_id: Option<String>,
+    s_code: String,
+    s_msg: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelOrderResponse {
+    code: String,
+    msg: String,
+    data: Vec<CancelOrderResponseData>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelOrderResponseData {
+    ord_id: String,
+    #[serde(default)]
+    inst_id: Option<String>,
+    s_code: String,
+    s_msg: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginRequest {
+    op: String,
+    args: Vec<LoginArgs>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginArgs {
+    api_key: String,
+    passphrase: String,
+    timestamp: String,
+    sign: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrivateSubscribeMessage {
+    id: Option<String>,
+    op: String,
+    args: Vec<PrivateSubscribeArg>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrivateSubscribeArg {
+    channel: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inst_type: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -284,6 +925,426 @@ fn decimal_places(value: &str) -> usize {
         .nth(1)
         .map(|fraction| fraction.len())
         .unwrap_or(0)
+}
+
+pub async fn fetch_account_snapshot(
+    config: &TradingConfig,
+    inst_ids: &[String],
+) -> Result<AccountSnapshot, anyhow::Error> {
+    let client = build_http_client()?;
+    let unique_inst_ids = unique_inst_ids(inst_ids);
+    let positions = fetch_positions(&client, config, inst_ids).await?;
+    let open_orders = fetch_open_orders(&client, config, &unique_inst_ids).await?;
+    Ok(AccountSnapshot {
+        positions,
+        open_orders,
+    })
+}
+
+async fn fetch_positions(
+    client: &Client,
+    config: &TradingConfig,
+    inst_ids: &[String],
+) -> Result<Vec<PositionInfo>, anyhow::Error> {
+    let response: PositionsResponse = signed_get(client, config, POSITIONS_ENDPOINT, &[]).await?;
+    if response.code != "0" {
+        return Err(anyhow!(
+            "okx positions error (code {}): {}",
+            response.code,
+            response.msg
+        ));
+    }
+    let filter = inst_filter(inst_ids);
+    let mut positions = Vec::new();
+    for entry in response.data {
+        if let Some(filter) = &filter {
+            if !filter.contains(&entry.inst_id.to_ascii_uppercase()) {
+                continue;
+            }
+        }
+        let size = entry.pos.parse::<f64>().unwrap_or(0.0);
+        if size == 0.0 {
+            continue;
+        }
+        let avg_px = entry.avg_px.parse::<f64>().ok();
+        let lever = parse_optional_float(entry.lever.clone());
+        positions.push(PositionInfo {
+            inst_id: entry.inst_id,
+            pos_side: entry.pos_side,
+            size,
+            avg_px,
+            lever,
+        });
+    }
+    Ok(positions)
+}
+
+async fn fetch_open_orders(
+    client: &Client,
+    config: &TradingConfig,
+    inst_ids: &[String],
+) -> Result<Vec<PendingOrderInfo>, anyhow::Error> {
+    if inst_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut open_orders = Vec::new();
+    for inst_id in inst_ids {
+        let query = vec![("instId", inst_id.clone())];
+        let response: PendingOrdersResponse =
+            signed_get(client, config, ORDERS_PENDING_ENDPOINT, &query).await?;
+        if response.code != "0" {
+            return Err(anyhow!(
+                "okx pending orders error for {} (code {}): {}",
+                inst_id,
+                response.code,
+                response.msg
+            ));
+        }
+        for entry in response.data {
+            let size = entry.sz.parse::<f64>().unwrap_or(0.0);
+            let price = parse_optional_float(entry.px);
+            open_orders.push(PendingOrderInfo {
+                inst_id: entry.inst_id,
+                ord_id: entry.ord_id,
+                side: entry.side,
+                pos_side: entry.pos_side,
+                price,
+                size,
+                state: entry.state,
+            });
+        }
+    }
+    Ok(open_orders)
+}
+
+fn parse_optional_float(value: Option<String>) -> Option<f64> {
+    value.as_deref().and_then(parse_float_str)
+}
+
+fn parse_float_str(value: &str) -> Option<f64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        trimmed.parse::<f64>().ok()
+    }
+}
+
+fn inst_filter(inst_ids: &[String]) -> Option<HashSet<String>> {
+    if inst_ids.is_empty() {
+        None
+    } else {
+        Some(
+            inst_ids
+                .iter()
+                .map(|inst| inst.to_ascii_uppercase())
+                .collect(),
+        )
+    }
+}
+
+fn unique_inst_ids(inst_ids: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut uniques = Vec::new();
+    for inst in inst_ids {
+        let key = inst.to_ascii_uppercase();
+        if seen.insert(key) {
+            uniques.push(inst.clone());
+        }
+    }
+    uniques
+}
+
+async fn signed_get<T>(
+    client: &Client,
+    config: &TradingConfig,
+    path: &str,
+    query: &[(&str, String)],
+) -> Result<T, anyhow::Error>
+where
+    T: DeserializeOwned,
+{
+    let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let query_refs: Vec<(&str, &str)> = query
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let mut request_path = path.to_string();
+    if !query_refs.is_empty() {
+        let query_string = serde_urlencoded::to_string(&query_refs)?;
+        request_path.push('?');
+        request_path.push_str(&query_string);
+    }
+    let signature = sign_payload(&config.api_secret, &timestamp, "GET", &request_path, "")?;
+    let mut request = client
+        .get(format!("{OKX_API_BASE}{path}"))
+        .header("OK-ACCESS-KEY", &config.api_key)
+        .header("OK-ACCESS-PASSPHRASE", &config.passphrase)
+        .header("OK-ACCESS-TIMESTAMP", &timestamp)
+        .header("OK-ACCESS-SIGN", signature);
+    if !query_refs.is_empty() {
+        request = request.query(&query_refs);
+    }
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("requesting OKX {}", path))?
+        .error_for_status()
+        .with_context(|| format!("OKX status {}", path))?
+        .json::<T>()
+        .await
+        .with_context(|| format!("decoding OKX response for {}", path))?;
+    Ok(response)
+}
+
+fn parse_ws_event(text: &str) -> Option<WsEventMessage> {
+    serde_json::from_str::<WsEventMessage>(text).ok()
+}
+
+fn current_ws_timestamp() -> String {
+    let now = Utc::now();
+    let seconds = now.timestamp() as f64;
+    let nanos = now.timestamp_subsec_nanos() as f64 / 1_000_000_000.0;
+    format!("{:.3}", seconds + nanos)
+}
+
+fn is_order_active(state: &str) -> bool {
+    match state {
+        "live" | "partially_filled" | "not_triggered" | "partially_filled_not_triggered" => true,
+        other => {
+            let lowered = other.to_ascii_lowercase();
+            matches!(
+                lowered.as_str(),
+                "live" | "partially_filled" | "not_triggered" | "partially_filled_not_triggered"
+            )
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PositionsResponse {
+    code: String,
+    msg: String,
+    data: Vec<OkxPositionEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OkxPositionEntry {
+    inst_id: String,
+    #[serde(default)]
+    pos_side: Option<String>,
+    #[serde(default)]
+    pos: String,
+    #[serde(default)]
+    avg_px: String,
+    #[serde(default)]
+    lever: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingOrdersResponse {
+    code: String,
+    msg: String,
+    data: Vec<OkxPendingOrderEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OkxPendingOrderEntry {
+    inst_id: String,
+    ord_id: String,
+    side: String,
+    #[serde(default)]
+    pos_side: Option<String>,
+    #[serde(default)]
+    px: Option<String>,
+    sz: String,
+    state: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WsEventMessage {
+    event: String,
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    msg: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrivateDataMessage<T> {
+    #[serde(rename = "arg")]
+    _arg: PrivateChannelArg,
+    data: Vec<T>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrivateChannelArg {
+    #[allow(dead_code)]
+    channel: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WsPositionEntry {
+    inst_id: String,
+    #[serde(default)]
+    pos_side: Option<String>,
+    #[serde(default)]
+    pos: String,
+    #[serde(default)]
+    avg_px: String,
+    #[serde(default)]
+    lever: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WsOrderEntry {
+    inst_id: String,
+    ord_id: String,
+    side: String,
+    #[serde(default)]
+    pos_side: Option<String>,
+    #[serde(default)]
+    px: Option<String>,
+    sz: String,
+    state: String,
+}
+
+struct AccountState {
+    filter: Option<HashSet<String>>,
+    positions: HashMap<PositionKey, PositionInfo>,
+    open_orders: HashMap<String, PendingOrderInfo>,
+}
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct PositionKey {
+    inst_id: String,
+    pos_side: Option<String>,
+}
+
+impl AccountState {
+    fn new(filter: Option<HashSet<String>>) -> Self {
+        AccountState {
+            filter,
+            positions: HashMap::new(),
+            open_orders: HashMap::new(),
+        }
+    }
+
+    fn accepts(&self, inst_id: &str) -> bool {
+        if let Some(filter) = &self.filter {
+            filter.contains(&inst_id.to_ascii_uppercase())
+        } else {
+            true
+        }
+    }
+
+    fn update_positions(&mut self, entries: &[WsPositionEntry]) -> bool {
+        let mut changed = false;
+        for entry in entries {
+            if !self.accepts(&entry.inst_id) {
+                continue;
+            }
+            let size = entry.pos.parse::<f64>().unwrap_or(0.0);
+            let avg_px = parse_float_str(&entry.avg_px);
+            let lever = parse_optional_float(entry.lever.clone());
+            let key = PositionKey {
+                inst_id: entry.inst_id.clone(),
+                pos_side: entry.pos_side.clone(),
+            };
+            if size == 0.0 {
+                if self.positions.remove(&key).is_some() {
+                    changed = true;
+                }
+                continue;
+            }
+            let entry_changed = match self.positions.get(&key) {
+                Some(existing) => {
+                    existing.size != size || existing.avg_px != avg_px || existing.lever != lever
+                }
+                None => true,
+            };
+            if entry_changed {
+                self.positions.insert(
+                    key,
+                    PositionInfo {
+                        inst_id: entry.inst_id.clone(),
+                        pos_side: entry.pos_side.clone(),
+                        size,
+                        avg_px,
+                        lever,
+                    },
+                );
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn update_orders(&mut self, entries: &[WsOrderEntry]) -> bool {
+        let mut changed = false;
+        for entry in entries {
+            if !self.accepts(&entry.inst_id) {
+                continue;
+            }
+            if is_order_active(&entry.state) {
+                let size = entry.sz.parse::<f64>().unwrap_or(0.0);
+                let price = parse_optional_float(entry.px.clone());
+                let entry_changed = match self.open_orders.get(&entry.ord_id) {
+                    Some(existing) => {
+                        existing.size != size
+                            || existing.price != price
+                            || existing.state != entry.state
+                    }
+                    None => true,
+                };
+                if entry_changed {
+                    self.open_orders.insert(
+                        entry.ord_id.clone(),
+                        PendingOrderInfo {
+                            inst_id: entry.inst_id.clone(),
+                            ord_id: entry.ord_id.clone(),
+                            side: entry.side.clone(),
+                            pos_side: entry.pos_side.clone(),
+                            price,
+                            size,
+                            state: entry.state.clone(),
+                        },
+                    );
+                    changed = true;
+                }
+            } else if self.open_orders.remove(&entry.ord_id).is_some() {
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn snapshot(&self) -> AccountSnapshot {
+        let mut positions: Vec<_> = self.positions.values().cloned().collect();
+        positions.sort_by(|a, b| {
+            a.inst_id
+                .cmp(&b.inst_id)
+                .then_with(|| a.pos_side.cmp(&b.pos_side))
+        });
+        let mut open_orders: Vec<_> = self.open_orders.values().cloned().collect();
+        open_orders.sort_by(|a, b| {
+            a.inst_id
+                .cmp(&b.inst_id)
+                .then_with(|| a.ord_id.cmp(&b.ord_id))
+        });
+        AccountSnapshot {
+            positions,
+            open_orders,
+        }
+    }
 }
 
 fn build_http_client() -> Result<Client, anyhow::Error> {

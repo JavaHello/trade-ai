@@ -23,6 +23,26 @@ pub struct CliParams {
     /// Amount of history the TUI keeps in memory (e.g., 15m, 1h, 1d)
     #[clap(long = "window", value_name = "DURATION", default_value = "15m")]
     pub window: DurationSpec,
+
+    /// OKX API key used for authenticated trading
+    #[clap(long = "okx-api-key", env = "OKX_API_KEY")]
+    pub okx_api_key: Option<String>,
+
+    /// OKX API secret used for authenticated trading
+    #[clap(long = "okx-api-secret", env = "OKX_API_SECRET")]
+    pub okx_api_secret: Option<String>,
+
+    /// OKX API passphrase used for authenticated trading
+    #[clap(long = "okx-api-passphrase", env = "OKX_API_PASSPHRASE")]
+    pub okx_api_passphrase: Option<String>,
+
+    /// Trading mode for OKX orders (cash, cross, or isolated)
+    #[clap(
+        long = "okx-td-mode",
+        default_value = "cross",
+        value_parser = ["cash", "cross", "isolated"]
+    )]
+    pub okx_td_mode: String,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +104,21 @@ impl CliParams {
 
     pub fn history_window(&self) -> Duration {
         self.window.as_duration()
+    }
+
+    pub fn trading_config(&self) -> Option<TradingConfig> {
+        let api_key = self.okx_api_key.as_ref()?.trim();
+        let secret = self.okx_api_secret.as_ref()?.trim();
+        let passphrase = self.okx_api_passphrase.as_ref()?.trim();
+        if api_key.is_empty() || secret.is_empty() || passphrase.is_empty() {
+            return None;
+        }
+        Some(TradingConfig {
+            api_key: api_key.to_string(),
+            api_secret: secret.to_string(),
+            passphrase: passphrase.to_string(),
+            td_mode: self.okx_td_mode.clone(),
+        })
     }
 }
 
@@ -148,4 +183,12 @@ fn parse_duration_spec(input: &str) -> Result<Duration, String> {
         return Err(format!("duration `{}` is too large", trimmed));
     }
     Ok(Duration::from_secs_f64(seconds))
+}
+
+#[derive(Clone, Debug)]
+pub struct TradingConfig {
+    pub api_key: String,
+    pub api_secret: String,
+    pub passphrase: String,
+    pub td_mode: String,
 }

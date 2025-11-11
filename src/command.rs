@@ -3,6 +3,8 @@ pub enum Command {
     MarkPriceUpdate(String, f64, i64, usize),
     Notify(String, String),
     Error(String),
+    TradeResult(TradeEvent),
+    AccountSnapshot(AccountSnapshot),
     Exit,
 }
 
@@ -12,4 +14,100 @@ pub struct PricePoint {
     pub mark_px: f64,
     pub ts: i64,
     pub precision: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TradeSide {
+    Buy,
+    Sell,
+}
+
+impl TradeSide {
+    pub fn as_okx_side(&self) -> &'static str {
+        match self {
+            TradeSide::Buy => "buy",
+            TradeSide::Sell => "sell",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeRequest {
+    pub inst_id: String,
+    pub side: TradeSide,
+    pub price: f64,
+    pub size: f64,
+    pub pos_side: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeResponse {
+    pub inst_id: String,
+    pub side: TradeSide,
+    pub price: f64,
+    pub size: f64,
+    pub order_id: Option<String>,
+    pub message: String,
+    pub success: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum TradeEvent {
+    Order(TradeResponse),
+    Cancel(CancelResponse),
+}
+
+impl TradeEvent {
+    pub fn message(&self) -> &str {
+        match self {
+            TradeEvent::Order(response) => response.message.as_str(),
+            TradeEvent::Cancel(response) => response.message.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum TradingCommand {
+    Place(TradeRequest),
+    Cancel(CancelOrderRequest),
+}
+
+#[derive(Debug, Clone)]
+pub struct CancelOrderRequest {
+    pub inst_id: String,
+    pub ord_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CancelResponse {
+    pub inst_id: String,
+    pub ord_id: String,
+    pub message: String,
+    pub success: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccountSnapshot {
+    pub positions: Vec<PositionInfo>,
+    pub open_orders: Vec<PendingOrderInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PositionInfo {
+    pub inst_id: String,
+    pub pos_side: Option<String>,
+    pub size: f64,
+    pub avg_px: Option<f64>,
+    pub lever: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingOrderInfo {
+    pub inst_id: String,
+    pub ord_id: String,
+    pub side: String,
+    pub pos_side: Option<String>,
+    pub price: Option<f64>,
+    pub size: f64,
+    pub state: String,
 }
