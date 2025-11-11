@@ -685,13 +685,7 @@ impl TuiApp {
                             self.last_draw = Instant::now();
                         }
                         Ok(Command::AccountSnapshot(snapshot)) => {
-                            let positions = snapshot.positions.len();
-                            let orders = snapshot.open_orders.len();
                             self.trade.update_snapshot(snapshot, &self.inst_ids);
-                            self.set_status_message(format!(
-                                "已同步 OKX 持仓 {} 条，挂单 {} 条",
-                                positions, orders
-                            ));
                             terminal.draw(|frame| self.render(frame))?;
                             self.last_draw = Instant::now();
                         }
@@ -838,7 +832,7 @@ impl TuiApp {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(header_height),
-                    Constraint::Length(6),
+                    Constraint::Length(12),
                     Constraint::Min(4),
                 ])
                 .split(area);
@@ -860,7 +854,7 @@ impl TuiApp {
             return;
         }
         let columns = Layout::default()
-            .direction(Direction::Horizontal)
+            .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(area);
         self.render_positions_panel(frame, columns[0]);
@@ -900,10 +894,12 @@ impl TuiApp {
         } else {
             lines.push(Line::from(format_columns(&[
                 ("合约", ColumnAlign::Left, 14),
-                ("方向", ColumnAlign::Left, 6),
+                ("方向", ColumnAlign::Left, 4),
                 ("数量", ColumnAlign::Right, 12),
                 ("均价", ColumnAlign::Right, 12),
                 ("杠杆", ColumnAlign::Right, 8),
+                ("盈亏", ColumnAlign::Right, 12),
+                ("盈亏%", ColumnAlign::Right, 10),
             ])));
             let selected_idx =
                 clamp_index(self.trade.selected_position_idx, self.trade.positions.len());
@@ -923,12 +919,22 @@ impl TuiApp {
                     .unwrap_or_else(|| "--".to_string());
                 let size_label = Self::format_contract_size(position.size);
                 let lever_label = Self::leverage_label(position.lever);
+                let pnl_value = self.position_pnl(position);
+                let pnl_label = pnl_value
+                    .map(Self::format_pnl)
+                    .unwrap_or_else(|| "--".to_string());
+                let pnl_ratio_label = self
+                    .position_pnl_ratio(position)
+                    .map(Self::format_pnl_ratio)
+                    .unwrap_or_else(|| "--".to_string());
                 let row = format_columns(&[
                     (position.inst_id.as_str(), ColumnAlign::Left, 14),
                     (side_label, ColumnAlign::Left, 6),
                     (size_label.as_str(), ColumnAlign::Right, 12),
                     (avg_label.as_str(), ColumnAlign::Right, 12),
                     (lever_label.as_str(), ColumnAlign::Right, 8),
+                    (pnl_label.as_str(), ColumnAlign::Right, 12),
+                    (pnl_ratio_label.as_str(), ColumnAlign::Right, 10),
                 ]);
                 let selected = idx == selected_idx && self.trade.focus == TradeFocus::Positions;
                 lines.push(Line::styled(row, row_style(selected)));
@@ -938,6 +944,38 @@ impl TuiApp {
             .alignment(Alignment::Left)
             .block(block);
         frame.render_widget(paragraph, area);
+    }
+
+    fn position_pnl(&self, position: &PositionInfo) -> Option<f64> {
+        if let Some(upl) = position.upl {
+            return Some(upl);
+        }
+        let avg = position.avg_px?;
+        let current = self.latest_prices.get(&position.inst_id).copied()?;
+        let signed_size = Self::signed_position_size(position);
+        Some((current - avg) * signed_size)
+    }
+
+    fn position_pnl_ratio(&self, position: &PositionInfo) -> Option<f64> {
+        if let Some(ratio) = position.upl_ratio {
+            return Some(ratio);
+        }
+        let pnl = self.position_pnl(position)?;
+        let avg = position.avg_px?;
+        let notional = avg * position.size.abs();
+        if notional.abs() < f64::EPSILON {
+            None
+        } else {
+            Some(pnl / notional)
+        }
+    }
+
+    fn signed_position_size(position: &PositionInfo) -> f64 {
+        match position.pos_side.as_deref() {
+            Some("long") => position.size.abs(),
+            Some("short") => -position.size.abs(),
+            _ => position.size,
+        }
     }
 
     fn render_open_orders_panel(&self, frame: &mut Frame, area: Rect) {
@@ -2637,9 +2675,24 @@ impl TuiApp {
         format!("{value:+.2}%", value = value)
     }
 
+    fn format_pnl(value: f64) -> String {
+        const PNL_PRECISION: usize = 8;
+        let formatted = format!("{value:+.prec$}", value = value, prec = PNL_PRECISION);
+        Self::trim_formatted_number(formatted)
+    }
+
+    fn format_pnl_ratio(value: f64) -> String {
+        let percent = value * 100.0;
+        format!("{percent:+.2}%", percent = percent)
+    }
+
     fn format_contract_size(value: f64) -> String {
         const SIZE_PRECISION: usize = 8;
-        let mut formatted = format!("{value:.prec$}", value = value, prec = SIZE_PRECISION);
+        let formatted = format!("{value:.prec$}", value = value, prec = SIZE_PRECISION);
+        Self::trim_formatted_number(formatted)
+    }
+
+    fn trim_formatted_number(mut formatted: String) -> String {
         if let Some(dot_pos) = formatted.find('.') {
             let mut trim_idx = formatted.len();
             while trim_idx > dot_pos + 1 && formatted.as_bytes()[trim_idx - 1] == b'0' {
@@ -2650,7 +2703,7 @@ impl TuiApp {
             }
             formatted.truncate(trim_idx);
         }
-        if formatted == "-0" {
+        if formatted == "-0" || formatted == "+0" {
             formatted = "0".to_string();
         }
         formatted

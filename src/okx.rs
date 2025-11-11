@@ -1106,12 +1106,16 @@ async fn fetch_positions(
         }
         let avg_px = entry.avg_px.parse::<f64>().ok();
         let lever = parse_optional_float(entry.lever.clone());
+        let upl = parse_optional_float(entry.upl.clone());
+        let upl_ratio = parse_optional_float(entry.upl_ratio.clone());
         positions.push(PositionInfo {
             inst_id: entry.inst_id,
             pos_side: entry.pos_side,
             size,
             avg_px,
             lever,
+            upl,
+            upl_ratio,
         });
     }
     Ok(positions)
@@ -1295,6 +1299,10 @@ struct OkxPositionEntry {
     avg_px: String,
     #[serde(default)]
     lever: Option<String>,
+    #[serde(default)]
+    upl: Option<String>,
+    #[serde(rename = "uplRatio", default)]
+    upl_ratio: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1361,6 +1369,10 @@ struct WsPositionEntry {
     avg_px: String,
     #[serde(default)]
     lever: Option<String>,
+    #[serde(default)]
+    upl: Option<String>,
+    #[serde(rename = "uplRatio", default)]
+    upl_ratio: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1442,6 +1454,8 @@ impl AccountState {
             let size = entry.pos.parse::<f64>().unwrap_or(0.0);
             let avg_px = parse_float_str(&entry.avg_px);
             let lever = parse_optional_float(entry.lever.clone());
+            let upl = parse_optional_float(entry.upl.clone());
+            let upl_ratio = parse_optional_float(entry.upl_ratio.clone());
             let key = PositionKey {
                 inst_id: entry.inst_id.clone(),
                 pos_side: entry.pos_side.clone(),
@@ -1454,7 +1468,11 @@ impl AccountState {
             }
             let entry_changed = match self.positions.get(&key) {
                 Some(existing) => {
-                    existing.size != size || existing.avg_px != avg_px || existing.lever != lever
+                    existing.size != size
+                        || existing.avg_px != avg_px
+                        || existing.lever != lever
+                        || existing.upl != upl
+                        || existing.upl_ratio != upl_ratio
                 }
                 None => true,
             };
@@ -1467,6 +1485,8 @@ impl AccountState {
                         size,
                         avg_px,
                         lever,
+                        upl,
+                        upl_ratio,
                     },
                 );
                 changed = true;

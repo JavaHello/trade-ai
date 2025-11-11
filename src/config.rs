@@ -108,14 +108,14 @@ impl CliParams {
 
     pub fn trading_config(&self) -> Option<TradingConfig> {
         let api_key = self.okx_api_key.as_ref()?.trim();
-        let secret = self.okx_api_secret.as_ref()?.trim();
+        let api_secret = self.okx_api_secret.as_ref()?.trim();
         let passphrase = self.okx_api_passphrase.as_ref()?.trim();
-        if api_key.is_empty() || secret.is_empty() || passphrase.is_empty() {
+        if api_key.is_empty() || api_secret.is_empty() || passphrase.is_empty() {
             return None;
         }
         Some(TradingConfig {
             api_key: api_key.to_string(),
-            api_secret: secret.to_string(),
+            api_secret: api_secret.to_string(),
             passphrase: passphrase.to_string(),
             td_mode: self.okx_td_mode.clone(),
         })

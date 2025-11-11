@@ -131,6 +131,10 @@ pub struct PositionInfo {
     pub size: f64,
     pub avg_px: Option<f64>,
     pub lever: Option<f64>,
+    #[serde(default)]
+    pub upl: Option<f64>,
+    #[serde(default)]
+    pub upl_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
