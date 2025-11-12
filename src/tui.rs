@@ -987,6 +987,7 @@ impl TuiApp {
                 ("方向", ColumnAlign::Left, 4),
                 ("数量", ColumnAlign::Right, 12),
                 ("均价", ColumnAlign::Right, 12),
+                ("标记价", ColumnAlign::Right, 12),
                 ("杠杆", ColumnAlign::Right, 8),
                 ("盈亏", ColumnAlign::Right, 12),
                 ("盈亏%", ColumnAlign::Right, 10),
@@ -1007,6 +1008,12 @@ impl TuiApp {
                     .avg_px
                     .map(|value| self.format_price_for(&position.inst_id, value))
                     .unwrap_or_else(|| "--".to_string());
+                let mark_label = self
+                    .latest_prices
+                    .get(&position.inst_id)
+                    .copied()
+                    .map(|value| self.format_price_for(&position.inst_id, value))
+                    .unwrap_or_else(|| "--".to_string());
                 let size_label = Self::format_contract_size(position.size);
                 let lever_label = Self::leverage_label(position.lever);
                 let pnl_value = self.position_pnl(position);
@@ -1024,6 +1031,7 @@ impl TuiApp {
                     (side_label, ColumnAlign::Left, 4),
                     (size_label.as_str(), ColumnAlign::Right, 12),
                     (avg_label.as_str(), ColumnAlign::Right, 12),
+                    (mark_label.as_str(), ColumnAlign::Right, 12),
                     (lever_label.as_str(), ColumnAlign::Right, 8),
                     (pnl_label.as_str(), ColumnAlign::Right, 12),
                     (pnl_ratio_label.as_str(), ColumnAlign::Right, 10),
