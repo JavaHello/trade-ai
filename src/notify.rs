@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::time::Duration;
 
 use tokio::sync::broadcast;
@@ -25,18 +26,7 @@ impl OsNotification {
                         if start.elapsed() <= self.interval {
                             continue;
                         }
-                        #[cfg(target_os = "linux")]
-                        {
-                            linux_notify(&msg, &inst_id).await?;
-                        }
-                        #[cfg(target_os = "macos")]
-                        {
-                            macos_notify(&msg, &inst_id).await?;
-                        }
-                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                        {
-                            // No desktop notification support on this platform.
-                        }
+                        terminal_notify(&inst_id, &msg)?;
                         start = tokio::time::Instant::now();
                     }
                     Command::Exit => {
@@ -51,44 +41,28 @@ impl OsNotification {
         Ok(())
     }
 }
-#[cfg(target_os = "linux")]
-async fn linux_notify(msg: &str, inst_id: &str) -> Result<(), anyhow::Error> {
-    use notify_rust::{CloseReason, Hint, Notification};
-    use tokio::process::Command;
-    Notification::new()
-        .summary("Price Monitor")
-        .body(msg)
-        .hint(Hint::Urgency(notify_rust::Urgency::Critical))
-        .action("open", "okx")
-        .show()
-        .unwrap()
-        .on_close(|_: CloseReason| {
-            let _ = Command::new("xdg-open")
-                .arg(format!(
-                    "https://www.okx.com/zh-hans/trade-swap/{}",
-                    inst_id.to_lowercase()
-                ))
-                .spawn();
-        });
+
+fn terminal_notify(inst_id: &str, msg: &str) -> Result<(), anyhow::Error> {
+    let title = format!("Price Monitor - {inst_id}");
+    let sanitized_title = sanitize_osc_field(&title);
+    let sanitized_body = sanitize_osc_field(msg);
+    emit_osc777(&sanitized_title, &sanitized_body)?;
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-async fn macos_notify(msg: &str, inst_id: &str) -> Result<(), anyhow::Error> {
-    use tokio::process::Command;
-
-    // Basic escaping for quotes so AppleScript parses the message correctly.
-    let escaped_msg = msg.replace('"', "\\\"");
-    let escaped_inst = inst_id.replace('"', "\\\"");
-    let script = format!(
-        r#"display notification "{}" with title "{}" subtitle "{}""#,
-        escaped_msg, "Price Monitor", escaped_inst
-    );
-
-    Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .status()
-        .await?;
+fn emit_osc777(title: &str, body: &str) -> Result<(), anyhow::Error> {
+    let mut stdout = io::stdout();
+    write!(stdout, "\u{1b}]777;notify;{};{}\u{7}", title, body)?;
+    stdout.flush()?;
     Ok(())
+}
+
+fn sanitize_osc_field(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !matches!(c, '\u{7}' | '\u{1b}'))
+        .map(|c| match c {
+            '\n' | '\r' => ' ',
+            _ => c,
+        })
+        .collect()
 }
