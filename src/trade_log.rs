@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -48,6 +48,8 @@ pub struct TradeLogStore {
 }
 
 impl TradeLogStore {
+    const TAIL_CHUNK_SIZE: usize = 8 * 1024;
+
     pub fn new(path: PathBuf) -> Self {
         TradeLogStore {
             path,
@@ -60,24 +62,20 @@ impl TradeLogStore {
     }
 
     pub fn load(&self) -> Result<Vec<TradeLogEntry>> {
-        let file = match File::open(&self.path) {
+        let mut file = match File::open(&self.path) {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(err) => return Err(err.into()),
         };
-        let reader = BufReader::new(file);
-        let mut entries = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
+        let lines = Self::read_tail_lines(&mut file, self.max_entries)?;
+        let mut entries = Vec::with_capacity(lines.len());
+        for line in lines {
             if line.trim().is_empty() {
                 continue;
             }
             if let Ok(stored) = serde_json::from_str::<StoredTradeLogEntry>(&line) {
                 entries.push(stored.into_entry());
             }
-        }
-        if entries.len() > self.max_entries {
-            entries = entries.split_off(entries.len() - self.max_entries);
         }
         Ok(entries)
     }
@@ -94,36 +92,53 @@ impl TradeLogStore {
             .open(&self.path)?;
         serde_json::to_writer(&mut file, &StoredTradeLogEntry::from(entry))?;
         file.write_all(b"\n")?;
-        drop(file);
-        self.compact_if_needed()?;
         Ok(())
     }
 
-    fn compact_if_needed(&self) -> Result<()> {
-        let metadata = match fs::metadata(&self.path) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err.into()),
-        };
-        let estimated_limit = (self.max_entries as u64).saturating_mul(256);
-        if metadata.len() <= estimated_limit {
-            return Ok(());
+    fn read_tail_lines(file: &mut File, max_lines: usize) -> Result<Vec<String>> {
+        if max_lines == 0 {
+            return Ok(Vec::new());
         }
-        let entries = self.load()?;
-        self.overwrite(&entries)
+
+        let mut pos = file.seek(SeekFrom::End(0))?;
+        let mut chunk = vec![0_u8; Self::TAIL_CHUNK_SIZE];
+        let mut pending = Vec::new();
+        let mut lines = Vec::new();
+
+        'outer: while pos > 0 && lines.len() < max_lines {
+            let read_size = std::cmp::min(pos, chunk.len() as u64) as usize;
+            pos -= read_size as u64;
+            file.seek(SeekFrom::Start(pos))?;
+            file.read_exact(&mut chunk[..read_size])?;
+
+            for &byte in chunk[..read_size].iter().rev() {
+                if byte == b'\n' {
+                    if Self::push_pending_line(&mut pending, &mut lines) && lines.len() == max_lines {
+                        break 'outer;
+                    }
+                } else {
+                    pending.push(byte);
+                }
+            }
+        }
+
+        if lines.len() < max_lines {
+            Self::push_pending_line(&mut pending, &mut lines);
+        }
+
+        lines.reverse();
+        Ok(lines)
     }
 
-    fn overwrite(&self, entries: &[TradeLogEntry]) -> Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.path)?;
-        for entry in entries {
-            serde_json::to_writer(&mut file, &StoredTradeLogEntry::from(entry))?;
-            file.write_all(b"\n")?;
+    fn push_pending_line(pending: &mut Vec<u8>, lines: &mut Vec<String>) -> bool {
+        if pending.is_empty() {
+            return false;
         }
-        Ok(())
+        pending.reverse();
+        let line = String::from_utf8_lossy(pending).to_string();
+        pending.clear();
+        lines.push(line);
+        true
     }
 }
 
