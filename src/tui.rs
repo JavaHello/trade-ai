@@ -288,7 +288,9 @@ impl TradeState {
     }
 
     fn record_result(&mut self, event: TradeEvent) -> AnyResult<()> {
-        let leverage = self.leverage_for_event(&event);
+        let leverage = event
+            .leverage_hint()
+            .or_else(|| self.leverage_for_event(&event));
         let entry = TradeLogEntry::from_event(event, leverage);
         self.push_log(entry.clone());
         if let Some(store) = &self.log_store {
@@ -1189,7 +1191,8 @@ impl TuiApp {
                 .iter()
                 .map(|line| Line::from(line.as_str())),
         );
-        let block = Block::bordered().title("Trade");
+
+        let block = self.section_block("Trade", TradeFocus::Instruments);
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
             .block(block);
@@ -1282,7 +1285,7 @@ impl TuiApp {
                 display_idx += 1;
             }
         }
-        let title = format!("委托记录 {log_count}/{MAX_TRADE_LOGS}");
+        let title = format!("Logs {log_count}/{MAX_TRADE_LOGS}");
         let mut block = Block::bordered().title(title);
         if self.trade.focus == TradeFocus::Logs {
             block = block.border_style(Style::default().fg(Color::LightMagenta));
@@ -2408,27 +2411,13 @@ impl TuiApp {
                     return;
                 }
             };
-            let leverage_request = {
+            let leverage_value = {
                 let trimmed = input.leverage.trim();
                 if trimmed.is_empty() {
-                    None
+                    input.initial_leverage
                 } else {
                     match trimmed.parse::<f64>() {
-                        Ok(value) if value > 0.0 => {
-                            let changed = input
-                                .initial_leverage
-                                .map(|prev| (prev - value).abs() > LEVERAGE_EPSILON)
-                                .unwrap_or(true);
-                            if changed {
-                                Some(SetLeverageRequest {
-                                    inst_id: input.inst_id.clone(),
-                                    lever: value,
-                                    pos_side: input.pos_side.clone(),
-                                })
-                            } else {
-                                None
-                            }
-                        }
+                        Ok(value) if value > 0.0 => Some(value),
                         Ok(_) => {
                             input.error = Some("杠杆必须为正数".to_string());
                             return;
@@ -2440,6 +2429,21 @@ impl TuiApp {
                     }
                 }
             };
+            let leverage_request = leverage_value.and_then(|value| {
+                let changed = input
+                    .initial_leverage
+                    .map(|prev| (prev - value).abs() > LEVERAGE_EPSILON)
+                    .unwrap_or(true);
+                if changed {
+                    Some(SetLeverageRequest {
+                        inst_id: input.inst_id.clone(),
+                        lever: value,
+                        pos_side: input.pos_side.clone(),
+                    })
+                } else {
+                    None
+                }
+            });
             (
                 TradeRequest {
                     inst_id: input.inst_id.clone(),
@@ -2450,6 +2454,7 @@ impl TuiApp {
                     reduce_only: input.reduce_only,
                     tag: input.tag.clone(),
                     operator: TradeOperator::Manual,
+                    leverage: leverage_value,
                 },
                 input.intent,
                 input.replace_order_id.clone(),

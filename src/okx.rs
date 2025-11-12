@@ -222,6 +222,7 @@ impl OkxTradingClient {
                             success: false,
                             operator: request.operator.clone(),
                             pos_side: request.pos_side.clone(),
+                            leverage: request.leverage,
                         },
                     };
                     let _ = self
@@ -675,6 +676,7 @@ fn build_trade_response(request: &TradeRequest, response: TradeOrderResponse) ->
         success,
         operator: request.operator.clone(),
         pos_side: request.pos_side.clone(),
+        leverage: request.leverage,
     }
 }
 

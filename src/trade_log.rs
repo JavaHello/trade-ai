@@ -113,7 +113,8 @@ impl TradeLogStore {
 
             for &byte in chunk[..read_size].iter().rev() {
                 if byte == b'\n' {
-                    if Self::push_pending_line(&mut pending, &mut lines) && lines.len() == max_lines {
+                    if Self::push_pending_line(&mut pending, &mut lines) && lines.len() == max_lines
+                    {
                         break 'outer;
                     }
                 } else {

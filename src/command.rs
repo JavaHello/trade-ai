@@ -63,6 +63,8 @@ pub struct TradeRequest {
     pub reduce_only: bool,
     pub tag: Option<String>,
     pub operator: TradeOperator,
+    #[serde(default)]
+    pub leverage: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -77,12 +79,23 @@ pub struct TradeResponse {
     pub operator: TradeOperator,
     #[serde(default)]
     pub pos_side: Option<String>,
+    #[serde(default)]
+    pub leverage: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TradeEvent {
     Order(TradeResponse),
     Cancel(CancelResponse),
+}
+
+impl TradeEvent {
+    pub fn leverage_hint(&self) -> Option<f64> {
+        match self {
+            TradeEvent::Order(response) => response.leverage,
+            TradeEvent::Cancel(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
