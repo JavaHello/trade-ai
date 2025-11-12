@@ -14,7 +14,7 @@ use tokio::task;
 
 use crate::command::{Command, TradingCommand};
 use crate::notify::OsNotification;
-use crate::okx::{OkxPrivateWsClient, OkxTradingClient, OkxWsClient};
+use crate::okx::{OkxBusinessWsClient, OkxPrivateWsClient, OkxTradingClient, OkxWsClient};
 use crate::tui::TuiApp;
 
 #[tokio::main]
@@ -68,6 +68,20 @@ async fn main() -> Result<(), anyhow::Error> {
             .await;
             if let Err(err) = result {
                 let _ = account_tx.send(Command::Error(format!("okx account ws error: {err}")));
+            }
+        });
+    }
+    if let Some(business_cfg) = trading_cfg.clone() {
+        let business_tx = tx.clone();
+        let inst_ids = param.inst_ids.clone();
+        task::spawn(async move {
+            let result = async {
+                let client = OkxBusinessWsClient::new(business_cfg, business_tx.clone())?;
+                client.stream_business(&inst_ids).await
+            }
+            .await;
+            if let Err(err) = result {
+                let _ = business_tx.send(Command::Error(format!("okx business ws error: {err}")));
             }
         });
     }

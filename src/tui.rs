@@ -20,7 +20,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::{
     AccountSnapshot, CancelOrderRequest, Command, PendingOrderInfo, PositionInfo, PricePoint,
-    SetLeverageRequest, TradeEvent, TradeOperator, TradeRequest, TradeSide, TradingCommand,
+    SetLeverageRequest, TradeEvent, TradeOperator, TradeOrderKind, TradeRequest, TradeSide,
+    TradingCommand,
 };
 use crate::trade_log::{TradeLogEntry, TradeLogStore};
 
@@ -98,6 +99,7 @@ struct OrderInputState {
     error: Option<String>,
     pos_side: Option<String>,
     intent: OrderIntent,
+    order_kind: TradeOrderKind,
     reduce_only: bool,
     tag: Option<String>,
     replace_order_id: Option<String>,
@@ -673,7 +675,7 @@ impl TuiApp {
 
     fn set_error_status_message(&mut self, message: impl Into<String>) {
         self.status_message = Some(message.into());
-        self.status_visible_until = Some(Instant::now() + Duration::from_secs(3));
+        self.status_visible_until = Some(Instant::now() + Duration::from_secs(5));
         self.status_is_error = true;
     }
 
@@ -1124,10 +1126,21 @@ impl TuiApp {
             {
                 let side_label = Self::order_side_label(&order.side, order.pos_side.as_deref());
                 let intent_label = self.order_intent_label(order);
-                let price_label = order
-                    .price
-                    .map(|value| self.format_price_for(&order.inst_id, value))
-                    .unwrap_or_else(|| "--".to_string());
+                let price_label = if let Some(trigger) = order.trigger_price {
+                    let trigger_text = self.format_price_for(&order.inst_id, trigger);
+                    match order.price {
+                        Some(ord_px) if (ord_px - trigger).abs() > f64::EPSILON => {
+                            let ord_text = self.format_price_for(&order.inst_id, ord_px);
+                            format!("{}->{}", trigger_text, ord_text)
+                        }
+                        _ => trigger_text,
+                    }
+                } else {
+                    order
+                        .price
+                        .map(|value| self.format_price_for(&order.inst_id, value))
+                        .unwrap_or_else(|| "--".to_string())
+                };
                 let size_label = Self::format_contract_size(order.size);
                 let ord_label = Self::short_order_id(&order.ord_id);
                 let lever_label = Self::leverage_label(order.lever);
@@ -1461,6 +1474,11 @@ impl TuiApp {
     }
 
     fn order_intent_label(&self, order: &PendingOrderInfo) -> &'static str {
+        match order.kind {
+            TradeOrderKind::TakeProfit => return "止盈",
+            TradeOrderKind::StopLoss => return "止损",
+            TradeOrderKind::Regular => {}
+        }
         if let Some(label) = Self::tagged_order_intent(order) {
             return label;
         }
@@ -1486,7 +1504,7 @@ impl TuiApp {
     }
 
     fn heuristic_reduce_only_intent(&self, order: &PendingOrderInfo) -> Option<&'static str> {
-        let price = order.price?;
+        let price = order.trigger_price.or(order.price)?;
         let position = self.position_for_order(order)?;
         let avg = position.avg_px?;
         let side = order.side.to_ascii_lowercase();
@@ -2186,6 +2204,7 @@ impl TuiApp {
             "1".to_string(),
             None,
             OrderIntent::Manual,
+            TradeOrderKind::Regular,
             false,
             None,
             None,
@@ -2221,7 +2240,21 @@ impl TuiApp {
         };
         let leverage = position.lever;
         self.open_order_dialog(
-            inst_id, side, price, size, pos_side, intent, true, tag, None, leverage,
+            inst_id,
+            side,
+            price,
+            size,
+            pos_side,
+            intent,
+            match intent {
+                OrderIntent::TakeProfit => TradeOrderKind::TakeProfit,
+                OrderIntent::StopLoss => TradeOrderKind::StopLoss,
+                _ => TradeOrderKind::Regular,
+            },
+            true,
+            tag,
+            None,
+            leverage,
         );
     }
 
@@ -2249,7 +2282,8 @@ impl TuiApp {
             }
         };
         let price = order
-            .price
+            .trigger_price
+            .or(order.price)
             .map(|value| self.format_price_for(&order.inst_id, value))
             .or_else(|| {
                 self.latest_prices
@@ -2269,6 +2303,7 @@ impl TuiApp {
             size,
             order.pos_side.clone(),
             OrderIntent::Modify,
+            order.kind,
             order.reduce_only,
             order.tag.clone(),
             Some(order.ord_id.clone()),
@@ -2300,6 +2335,7 @@ impl TuiApp {
             ord_id: order.ord_id.clone(),
             operator: TradeOperator::Manual,
             pos_side: order.pos_side.clone(),
+            kind: order.kind,
         });
         match sender.try_send(request) {
             Ok(_) => {
@@ -2325,6 +2361,7 @@ impl TuiApp {
         size: String,
         pos_side: Option<String>,
         intent: OrderIntent,
+        order_kind: TradeOrderKind,
         reduce_only: bool,
         tag: Option<String>,
         replace_order_id: Option<String>,
@@ -2344,6 +2381,7 @@ impl TuiApp {
             error: None,
             pos_side,
             intent,
+            order_kind,
             reduce_only,
             tag,
             replace_order_id,
@@ -2455,6 +2493,7 @@ impl TuiApp {
                     tag: input.tag.clone(),
                     operator: TradeOperator::Manual,
                     leverage: leverage_value,
+                    kind: input.order_kind,
                 },
                 input.intent,
                 input.replace_order_id.clone(),
@@ -2482,6 +2521,7 @@ impl TuiApp {
                     ord_id,
                     operator: TradeOperator::Manual,
                     pos_side: request.pos_side.clone(),
+                    kind: request.kind,
                 });
                 match tx.try_send(cancel_request) {
                     Ok(_) => {}

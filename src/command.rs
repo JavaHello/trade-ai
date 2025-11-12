@@ -33,6 +33,19 @@ impl TradeSide {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TradeOrderKind {
+    Regular,
+    TakeProfit,
+    StopLoss,
+}
+
+impl Default for TradeOrderKind {
+    fn default() -> Self {
+        TradeOrderKind::Regular
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TradeOperator {
     Manual,
@@ -65,6 +78,8 @@ pub struct TradeRequest {
     pub operator: TradeOperator,
     #[serde(default)]
     pub leverage: Option<f64>,
+    #[serde(default)]
+    pub kind: TradeOrderKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -81,6 +96,8 @@ pub struct TradeResponse {
     pub pos_side: Option<String>,
     #[serde(default)]
     pub leverage: Option<f64>,
+    #[serde(default)]
+    pub kind: TradeOrderKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -111,6 +128,8 @@ pub struct CancelOrderRequest {
     pub ord_id: String,
     pub operator: TradeOperator,
     pub pos_side: Option<String>,
+    #[serde(default)]
+    pub kind: TradeOrderKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -162,4 +181,8 @@ pub struct PendingOrderInfo {
     pub reduce_only: bool,
     pub tag: Option<String>,
     pub lever: Option<f64>,
+    #[serde(default)]
+    pub trigger_price: Option<f64>,
+    #[serde(default)]
+    pub kind: TradeOrderKind,
 }
