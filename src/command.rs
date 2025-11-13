@@ -167,6 +167,7 @@ pub struct PositionInfo {
     pub upl: Option<f64>,
     #[serde(default)]
     pub upl_ratio: Option<f64>,
+    pub imr: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1713,6 +1713,7 @@ async fn fetch_positions(
         let lever = parse_optional_float(entry.lever.clone());
         let upl = parse_optional_float(entry.upl.clone());
         let upl_ratio = parse_optional_float(entry.upl_ratio.clone());
+        let imr = parse_optional_float(entry.imr.clone()).unwrap_or(0.0);
         positions.push(PositionInfo {
             inst_id: entry.inst_id,
             pos_side: entry.pos_side,
@@ -1721,6 +1722,7 @@ async fn fetch_positions(
             lever,
             upl,
             upl_ratio,
+            imr,
         });
     }
     Ok(positions)
@@ -2016,6 +2018,8 @@ struct OkxPositionEntry {
     upl: Option<String>,
     #[serde(rename = "uplRatio", default)]
     upl_ratio: Option<String>,
+    #[serde(default)]
+    imr: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2124,6 +2128,8 @@ struct WsPositionEntry {
     upl: Option<String>,
     #[serde(rename = "uplRatio", default)]
     upl_ratio: Option<String>,
+    #[serde(default)]
+    imr: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2237,6 +2243,7 @@ impl AccountState {
             let lever = parse_optional_float(entry.lever.clone());
             let upl = parse_optional_float(entry.upl.clone());
             let upl_ratio = parse_optional_float(entry.upl_ratio.clone());
+            let imr = parse_optional_float(entry.imr.clone()).unwrap_or(0.0);
             let key = PositionKey {
                 inst_id: entry.inst_id.clone(),
                 pos_side: entry.pos_side.clone(),
@@ -2268,6 +2275,7 @@ impl AccountState {
                         lever,
                         upl,
                         upl_ratio,
+                        imr,
                     },
                 );
                 changed = true;

@@ -993,6 +993,7 @@ impl TuiApp {
                 ("均价", ColumnAlign::Right, 12),
                 ("标记价", ColumnAlign::Right, 12),
                 ("杠杆", ColumnAlign::Right, 8),
+                ("保证金", ColumnAlign::Right, 12),
                 ("盈亏", ColumnAlign::Right, 12),
                 ("盈亏%", ColumnAlign::Right, 10),
             ])));
@@ -1020,6 +1021,7 @@ impl TuiApp {
                     .unwrap_or_else(|| "--".to_string());
                 let size_label = Self::format_contract_size(position.size);
                 let lever_label = Self::leverage_label(position.lever);
+                let imr_label = Self::format_imr(position.imr);
                 let pnl_value = self.position_pnl(position);
                 let pnl_label = pnl_value
                     .map(Self::format_pnl)
@@ -1037,6 +1039,7 @@ impl TuiApp {
                     (avg_label.as_str(), ColumnAlign::Right, 12),
                     (mark_label.as_str(), ColumnAlign::Right, 12),
                     (lever_label.as_str(), ColumnAlign::Right, 8),
+                    (imr_label.as_str(), ColumnAlign::Right, 12),
                     (pnl_label.as_str(), ColumnAlign::Right, 12),
                     (pnl_ratio_label.as_str(), ColumnAlign::Right, 10),
                 ]);
@@ -2864,6 +2867,10 @@ impl TuiApp {
         const SIZE_PRECISION: usize = 8;
         let formatted = format!("{value:.prec$}", value = value, prec = SIZE_PRECISION);
         Self::trim_formatted_number(formatted)
+    }
+
+    fn format_imr(value: f64) -> String {
+        format!("{:.2}", value)
     }
 
     fn trim_formatted_number(mut formatted: String) -> String {
