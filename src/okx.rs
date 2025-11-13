@@ -7,11 +7,11 @@ use chrono::{SecondsFormat, Utc};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use reqwest::{Client, ClientBuilder};
-use reqwest_websocket::{Bytes, Message, RequestBuilderExt, WebSocket};
+use reqwest_websocket::{Message, RequestBuilderExt, WebSocket};
 use serde::de::DeserializeOwned;
 use sha2::Sha256;
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::{self, Duration, sleep, timeout};
+use tokio::time::{Duration, interval, sleep};
 
 use crate::command::{
     AccountSnapshot, CancelOrderRequest, CancelResponse, Command, PendingOrderInfo, PositionInfo,
@@ -803,22 +803,32 @@ impl OkxBusinessWsClient {
                 self.emit_error(format!("failed to bootstrap account snapshot: {err}"));
             }
         }
-        while let Some(result) = ws_rx.next().await {
-            match result {
-                Ok(Message::Text(text)) => {
-                    self.handle_private_text(&text, &mut state)?;
+        let mut ping_interval = interval(Duration::from_secs(20));
+        loop {
+            tokio::select! {
+                _ = ping_interval.tick() => {
+                    ws_tx.send(Message::Ping(Vec::new().into())).await?;
                 }
-                Ok(Message::Ping(_)) => {}
-                Ok(Message::Close { code, reason }) => {
-                    return Err(anyhow!(
-                        "business websocket closed by server: code={code}, reason={reason:?}"
-                    ));
+                maybe_message = ws_rx.next() => {
+                    match maybe_message {
+                        Some(Ok(Message::Text(text))) => {
+                            self.handle_private_text(&text, &mut state)?;
+                        }
+                        Some(Ok(Message::Ping(payload))) => {
+                            ws_tx.send(Message::Pong(payload)).await?;
+                        }
+                        Some(Ok(Message::Close { code, reason })) => {
+                            return Err(anyhow!(
+                                "business websocket closed by server: code={code}, reason={reason:?}"
+                            ));
+                        }
+                        Some(Ok(Message::Pong(_))) | Some(Ok(Message::Binary(_))) => {}
+                        Some(Err(err)) => return Err(err.into()),
+                        None => return Err(anyhow!("business websocket closed")),
+                    }
                 }
-                Ok(Message::Pong(_)) | Ok(Message::Binary(_)) => {}
-                Err(err) => return Err(err.into()),
             }
         }
-        Err(anyhow!("business websocket closed"))
     }
 
     async fn send_login(
@@ -1662,10 +1672,12 @@ pub async fn fetch_account_snapshot(
 ) -> Result<AccountSnapshot, anyhow::Error> {
     let client = build_http_client()?;
     let unique_inst_ids = unique_inst_ids(inst_ids);
-    let positions = fetch_positions(&client, config, inst_ids).await?;
+    let mut positions = fetch_positions(&client, config, inst_ids).await?;
     let mut open_orders = fetch_open_orders(&client, config, &unique_inst_ids).await?;
     let mut algo_orders = fetch_open_algo_orders(&client, config, &unique_inst_ids).await?;
     open_orders.append(&mut algo_orders);
+    open_orders.sort_by(|a, b| a.inst_id.cmp(&b.inst_id));
+    positions.sort_by(|a, b| a.inst_id.cmp(&b.inst_id));
     Ok(AccountSnapshot {
         positions,
         open_orders,
@@ -2405,4 +2417,27 @@ fn build_http_client() -> Result<Client, anyhow::Error> {
         .read_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_decimal_places() {
+        assert_eq!(decimal_places("123.456"), 3);
+        assert_eq!(decimal_places("0.00100"), 5);
+        assert_eq!(decimal_places("100"), 0);
+        assert_eq!(decimal_places("3.14e2"), 4);
+        assert_eq!(decimal_places(""), 0);
+    }
+
+    #[test]
+    fn test_parse_float_str() {
+        assert_eq!(parse_float_str("123.456"), Some(123.456));
+        assert_eq!(parse_float_str("  0.00100  "), Some(0.00100));
+        assert_eq!(parse_float_str("100"), Some(100.0));
+        assert_eq!(parse_float_str("abc"), None);
+        assert_eq!(parse_float_str(""), None);
+        assert_eq!(parse_float_str("1e-8"), Some(1e-8));
+    }
 }

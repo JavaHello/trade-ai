@@ -2867,15 +2867,11 @@ impl TuiApp {
     }
 
     fn trim_formatted_number(mut formatted: String) -> String {
-        if let Some(dot_pos) = formatted.find('.') {
-            let mut trim_idx = formatted.len();
-            while trim_idx > dot_pos + 1 && formatted.as_bytes()[trim_idx - 1] == b'0' {
-                trim_idx -= 1;
-            }
-            if trim_idx == dot_pos + 1 {
-                trim_idx -= 1;
-            }
-            formatted.truncate(trim_idx);
+        if formatted.contains('.') {
+            formatted = formatted
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string();
         }
         if formatted == "-0" || formatted == "+0" {
             formatted = "0".to_string();
