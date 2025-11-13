@@ -23,6 +23,7 @@ use crate::command::{
     SetLeverageRequest, TradeEvent, TradeOperator, TradeOrderKind, TradeRequest, TradeSide,
     TradingCommand,
 };
+use crate::okx::MarketInfo;
 use crate::trade_log::{TradeLogEntry, TradeLogStore};
 
 const COLOR_PALETTE: [Color; 8] = [
@@ -122,12 +123,14 @@ struct TradeState {
     focus: TradeFocus,
     log_store: Option<TradeLogStore>,
     log_detail: Option<TradeLogEntry>,
+    markets: HashMap<String, MarketInfo>,
 }
 
 impl TradeState {
     fn new(
         order_tx: Option<mpsc::Sender<TradingCommand>>,
         log_store: Option<TradeLogStore>,
+        markets: HashMap<String, MarketInfo>,
     ) -> Self {
         TradeState {
             selected_inst_idx: 0,
@@ -145,6 +148,7 @@ impl TradeState {
             focus: TradeFocus::Instruments,
             log_store,
             log_detail: None,
+            markets,
         }
     }
 
@@ -509,17 +513,16 @@ impl TradeState {
             }
             return None;
         }
-        let mut matched: Option<&PositionInfo> = None;
         for position in &self.positions {
             if !position.inst_id.eq_ignore_ascii_case(inst_id) {
                 continue;
             }
-            if matched.is_some() {
-                return None;
-            }
-            matched = Some(position);
+            return position.lever;
         }
-        matched.and_then(|pos| pos.lever)
+        if let Some(market) = self.markets.get(inst_id) {
+            return Some(market.lever);
+        }
+        None
     }
 
     fn selected_log_display_index(&self) -> usize {
@@ -629,6 +632,7 @@ impl TuiApp {
     pub fn new(
         inst_ids: &[String],
         retention: Duration,
+        markets: HashMap<String, MarketInfo>,
         order_tx: Option<mpsc::Sender<TradingCommand>>,
     ) -> TuiApp {
         let min_redraw_gap = Duration::from_millis(100);
@@ -662,7 +666,7 @@ impl TuiApp {
             y_zoom: 1.0,
             multi_axis: false,
             view_mode: ViewMode::Chart,
-            trade: TradeState::new(order_tx, Some(log_store)),
+            trade: TradeState::new(order_tx, Some(log_store), markets),
             exit_confirmation: false,
         }
     }
@@ -1019,7 +1023,7 @@ impl TuiApp {
                     .copied()
                     .map(|value| self.format_price_for(&position.inst_id, value))
                     .unwrap_or_else(|| "--".to_string());
-                let size_label = Self::format_contract_size(position.size);
+                let size_label = self.format_contract_size(&position.inst_id, position.size);
                 let lever_label = Self::leverage_label(position.lever);
                 let imr_label = Self::format_imr(position.imr);
                 let pnl_value = self.position_pnl(position);
@@ -1144,7 +1148,7 @@ impl TuiApp {
                         .map(|value| self.format_price_for(&order.inst_id, value))
                         .unwrap_or_else(|| "--".to_string())
                 };
-                let size_label = Self::format_contract_size(order.size);
+                let size_label = self.format_contract_size(&order.inst_id, order.size);
                 let ord_label = Self::short_order_id(&order.ord_id);
                 let lever_label = Self::leverage_label(order.lever);
                 let ordinal_label = format!("{}", idx + 1);
@@ -1358,7 +1362,7 @@ impl TuiApp {
         match &entry.event {
             TradeEvent::Order(response) => {
                 let side_label = Self::side_short_label(response.side).to_string();
-                let size_label = Self::format_contract_size(response.size);
+                let size_label = self.format_contract_size(&response.inst_id, response.size);
                 let price_label = self.format_price_for(&response.inst_id, response.price);
                 let status_color = Self::status_color(response.success);
                 vec![
@@ -1721,7 +1725,7 @@ impl TuiApp {
                 lines.push(Line::from(format!(
                     "方向 {} · 数量 {}",
                     Self::side_label(response.side),
-                    Self::format_contract_size(response.size),
+                    self.format_contract_size(&response.inst_id, response.size),
                 )));
                 lines.push(Line::from(format!(
                     "价格 {}",
@@ -2234,7 +2238,7 @@ impl TuiApp {
             .get(&inst_id)
             .map(|value| self.format_price_for(&inst_id, *value))
             .unwrap_or_else(|| "".to_string());
-        let size = Self::format_contract_size(position.size.abs());
+        let size = self.format_contract_size(&position.inst_id, position.size.abs());
         let pos_side = Self::pos_side_for_position(&position);
         let tag = match intent {
             OrderIntent::TakeProfit => Some("tp".to_string()),
@@ -2294,7 +2298,7 @@ impl TuiApp {
                     .map(|value| self.format_price_for(&order.inst_id, *value))
             })
             .unwrap_or_default();
-        let size = Self::format_contract_size(order.size.abs());
+        let size = self.format_contract_size(&order.inst_id, order.size.abs());
         let leverage = order.lever.or_else(|| {
             self.trade
                 .leverage_for_inst(&order.inst_id, order.pos_side.as_deref())
@@ -2438,6 +2442,8 @@ impl TuiApp {
                 Some(value) => value,
                 None => return,
             };
+            let order_kind = input.order_kind;
+
             let price = match input.price.trim().parse::<f64>() {
                 Ok(value) if value > 0.0 => value,
                 _ => {
@@ -2452,6 +2458,23 @@ impl TuiApp {
                     return;
                 }
             };
+            let size = if let Some(market) = self.trade.markets.get(&input.inst_id) {
+                size / market.ct_val
+            } else {
+                input.error = Some("无法获取合约信息，无法提交平仓单".to_string());
+                return;
+            };
+            if let Some(position) = self.trade.positions.iter().find(|pos| {
+                pos.inst_id == input.inst_id && Self::pos_side_for_position(pos) == input.pos_side
+            }) {
+                if size > position.size.abs() {
+                    input.error = Some("平仓数量不能大于持仓数量".to_string());
+                    return;
+                }
+            } else {
+                input.error = Some("未找到对应持仓，无法提交平仓单".to_string());
+                return;
+            }
             let leverage_value = {
                 let trimmed = input.leverage.trim();
                 if trimmed.is_empty() {
@@ -2496,7 +2519,7 @@ impl TuiApp {
                     tag: input.tag.clone(),
                     operator: TradeOperator::Manual,
                     leverage: leverage_value,
-                    kind: input.order_kind,
+                    kind: order_kind,
                 },
                 input.intent,
                 input.replace_order_id.clone(),
@@ -2541,7 +2564,7 @@ impl TuiApp {
             match tx.try_send(TradingCommand::Place(request.clone())) {
                 Ok(_) => {
                     let price_fmt = self.format_price_for(&request.inst_id, request.price);
-                    let size_fmt = Self::format_contract_size(request.size);
+                    let size_fmt = self.format_contract_size(&request.inst_id, request.size);
                     self.set_status_message(format!(
                         "{} 已发送{} {} {} @ {}",
                         intent.action_label(),
@@ -2863,7 +2886,13 @@ impl TuiApp {
         format!("{percent:+.2}%", percent = percent)
     }
 
-    fn format_contract_size(value: f64) -> String {
+    fn format_contract_size(&self, inst_id: &str, value: f64) -> String {
+        let mut value = value;
+        if let Some(mkt) = self.trade.markets.get(inst_id) {
+            if mkt.ct_val > 0.0 {
+                value *= mkt.ct_val;
+            }
+        }
         const SIZE_PRECISION: usize = 8;
         let formatted = format!("{value:.prec$}", value = value, prec = SIZE_PRECISION);
         Self::trim_formatted_number(formatted)

@@ -6,6 +6,8 @@ mod okx;
 mod trade_log;
 mod tui;
 
+use std::collections::HashMap;
+
 use anyhow::anyhow;
 use clap::Parser;
 use color_eyre::Result;
@@ -24,6 +26,12 @@ async fn main() -> Result<(), anyhow::Error> {
     let param = config::CliParams::parse();
     let (tx, mut rx) = broadcast::channel::<Command>(16);
     let trading_cfg = param.trading_config();
+    let markets = if let Some(cfg) = trading_cfg.clone() {
+        let inst_ids = param.inst_ids.clone();
+        okx::fetch_market_info(&param.okx_td_mode, &cfg, &inst_ids).await?
+    } else {
+        HashMap::new()
+    };
     let order_tx = if let Some(trading_cfg) = trading_cfg.clone() {
         let (trade_tx, trade_rx) = mpsc::channel::<TradingCommand>(32);
         let trading_tx = tx.clone();
@@ -129,7 +137,7 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     });
 
-    let mut app = TuiApp::new(&param.inst_ids, history_window, order_tx);
+    let mut app = TuiApp::new(&param.inst_ids, history_window, markets.clone(), order_tx);
     app.preload_trade_logs();
     if !history_points.is_empty() {
         app.preload_history(&history_points);

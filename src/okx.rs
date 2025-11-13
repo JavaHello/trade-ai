@@ -84,6 +84,8 @@ const PRIVATE_WS_ENDPOINT: &str = "wss://ws.okx.com:8443/ws/v5/private";
 const BUSINESS_WS_ENDPOINT: &str = "wss://ws.okx.com:8443/ws/v5/business";
 const OKX_API_BASE: &str = "https://www.okx.com";
 const MARK_PRICE_CANDLES_ENDPOINT: &str = "https://www.okx.com/api/v5/market/mark-price-candles";
+const INSTRUMENTS_ENDPOINT: &str = "/api/v5/account/instruments";
+const ACCOUNT_LEVERAGE_ENDPOINT: &str = "/api/v5/account/leverage-info";
 const TRADE_ORDER_ENDPOINT: &str = "/api/v5/trade/order";
 const TRADE_ORDER_ALGO_ENDPOINT: &str = "/api/v5/trade/order-algo";
 const CANCEL_ORDER_ENDPOINT: &str = "/api/v5/trade/cancel-order";
@@ -1262,8 +1264,6 @@ struct AlgoOrderRequest {
     sl_trigger_px: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sl_ord_px: Option<String>,
-    #[serde(rename = "tpSlMode", skip_serializing_if = "Option::is_none")]
-    tp_sl_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tag: Option<String>,
 }
@@ -1280,7 +1280,6 @@ impl AlgoOrderRequest {
             .pos_side
             .clone()
             .or_else(|| pos_side_for(&request.inst_id, request.side).map(|s| s.to_string()));
-        let has_tp_sl = tp_trigger_px.is_some() || sl_trigger_px.is_some();
         AlgoOrderRequest {
             inst_id: request.inst_id.clone(),
             td_mode: td_mode.to_string(),
@@ -1297,11 +1296,6 @@ impl AlgoOrderRequest {
             tp_ord_px,
             sl_trigger_px,
             sl_ord_px,
-            tp_sl_mode: if has_tp_sl {
-                Some("partial".to_string())
-            } else {
-                None
-            },
             tag: request.tag.clone(),
         }
     }
@@ -1628,6 +1622,89 @@ fn decimal_places(value: &str) -> usize {
         .unwrap_or(0)
 }
 
+pub async fn fetch_market_info(
+    mgn_mode: &str,
+    config: &TradingConfig,
+    inst_ids: &[String],
+) -> Result<HashMap<String, MarketInfo>, anyhow::Error> {
+    let mut markets = fetch_account_instruments(config, inst_ids).await?;
+    let al = fetch_account_leverage(mgn_mode, config, inst_ids).await?;
+
+    for (inst_id, market) in markets.iter_mut() {
+        if let Some(lever) = al.get(inst_id) {
+            market.lever = *lever;
+        }
+    }
+    Ok(markets)
+}
+
+async fn fetch_account_leverage(
+    mgn_mode: &str,
+    config: &TradingConfig,
+    inst_ids: &[String],
+) -> Result<HashMap<String, f64>, anyhow::Error> {
+    let client = build_http_client()?;
+    let query = vec![
+        ("mgnMode", mgn_mode.to_string()),
+        ("instId", inst_ids.join(",")),
+    ];
+    let response: LeverageInfoResponse =
+        signed_get(&client, config, ACCOUNT_LEVERAGE_ENDPOINT, &query).await?;
+    if response.code != "0" {
+        return Err(anyhow!(
+            "okx positions error (code {}): {}",
+            response.code,
+            response.msg
+        ));
+    }
+    let filter = inst_filter(inst_ids);
+    let mut leverages = HashMap::new();
+    for entry in response.data {
+        if let Some(filter) = &filter {
+            if !filter.contains(&entry.inst_id.to_ascii_uppercase()) {
+                continue;
+            }
+        }
+        if let Ok(lever) = entry.lever.parse::<f64>() {
+            leverages.insert(entry.inst_id.clone(), lever);
+        }
+    }
+    Ok(leverages)
+}
+
+async fn fetch_account_instruments(
+    config: &TradingConfig,
+    inst_ids: &[String],
+) -> Result<HashMap<String, MarketInfo>, anyhow::Error> {
+    let client = build_http_client()?;
+    let mut instruments = HashMap::new();
+    for inst_id in inst_ids {
+        let query = vec![
+            ("instId", inst_id.to_string()),
+            ("instType", "SWAP".to_string()),
+        ];
+        let response: InstrumentsResponse =
+            signed_get(&client, config, INSTRUMENTS_ENDPOINT, &query).await?;
+        if response.code != "0" {
+            return Err(anyhow!(
+                "okx instruments error (code {}): {}",
+                response.code,
+                response.msg
+            ));
+        }
+        for entry in response.data {
+            instruments.insert(
+                entry.inst_id.clone(),
+                MarketInfo {
+                    ct_val: entry.ct_val.parse::<f64>().unwrap_or(0.0),
+                    lever: 1.0,
+                },
+            );
+        }
+    }
+    Ok(instruments)
+}
+
 pub async fn fetch_account_snapshot(
     config: &TradingConfig,
     inst_ids: &[String],
@@ -1676,6 +1753,7 @@ async fn fetch_positions(
         let upl = parse_optional_float(entry.upl.clone());
         let upl_ratio = parse_optional_float(entry.upl_ratio.clone());
         let imr = parse_optional_float(entry.imr.clone()).unwrap_or(0.0);
+
         positions.push(PositionInfo {
             inst_id: entry.inst_id,
             pos_side: entry.pos_side,
@@ -1763,14 +1841,14 @@ async fn fetch_open_algo_orders(
         }
         for entry in response.data {
             if is_order_active(&entry.state) {
-                open_orders.push(build_pending_order_from_algo(entry));
+                open_orders.push(build_pending_order_from_algo(entry).await);
             }
         }
     }
     Ok(open_orders)
 }
 
-fn build_pending_order_from_algo(entry: OkxPendingAlgoOrderEntry) -> PendingOrderInfo {
+async fn build_pending_order_from_algo(entry: OkxPendingAlgoOrderEntry) -> PendingOrderInfo {
     let size = entry.sz.parse::<f64>().unwrap_or(0.0);
     let price = parse_optional_float(
         entry
@@ -2051,6 +2129,36 @@ struct OkxPendingAlgoOrderEntry {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstrumentsResponse {
+    code: String,
+    msg: String,
+    data: Vec<InstrumentsEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstrumentsEntry {
+    inst_id: String,
+    ct_val: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LeverageInfoResponse {
+    code: String,
+    msg: String,
+    data: Vec<LeverageInfoEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LeverageInfoEntry {
+    inst_id: String,
+    lever: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct WsEventMessage {
     event: String,
     #[serde(default)]
@@ -2174,7 +2282,7 @@ impl SharedAccountState {
 
     async fn update_positions(&self, entries: &[WsPositionEntry]) -> Option<AccountSnapshot> {
         let mut state = self.inner.lock().await;
-        if state.update_positions(entries) {
+        if state.update_positions(entries).await {
             Some(state.snapshot())
         } else {
             None
@@ -2183,7 +2291,7 @@ impl SharedAccountState {
 
     async fn update_orders(&self, entries: &[WsOrderEntry]) -> Option<AccountSnapshot> {
         let mut state = self.inner.lock().await;
-        if state.update_orders(entries) {
+        if state.update_orders(entries).await {
             Some(state.snapshot())
         } else {
             None
@@ -2192,12 +2300,17 @@ impl SharedAccountState {
 
     async fn update_algo_orders(&self, entries: &[WsAlgoOrderEntry]) -> Option<AccountSnapshot> {
         let mut state = self.inner.lock().await;
-        if state.update_algo_orders(entries) {
+        if state.update_algo_orders(entries).await {
             Some(state.snapshot())
         } else {
             None
         }
     }
+}
+#[derive(Debug, Clone)]
+pub struct MarketInfo {
+    pub ct_val: f64,
+    pub lever: f64,
 }
 
 struct AccountState {
@@ -2265,7 +2378,7 @@ impl AccountState {
         }
     }
 
-    fn update_positions(&mut self, entries: &[WsPositionEntry]) -> bool {
+    async fn update_positions(&mut self, entries: &[WsPositionEntry]) -> bool {
         let mut changed = false;
         for entry in entries {
             if !self.accepts(&entry.inst_id) {
@@ -2317,7 +2430,7 @@ impl AccountState {
         changed
     }
 
-    fn update_orders(&mut self, entries: &[WsOrderEntry]) -> bool {
+    async fn update_orders(&mut self, entries: &[WsOrderEntry]) -> bool {
         let mut changed = false;
         for entry in entries {
             if !self.accepts(&entry.inst_id) {
@@ -2365,7 +2478,7 @@ impl AccountState {
         changed
     }
 
-    fn update_algo_orders(&mut self, entries: &[WsAlgoOrderEntry]) -> bool {
+    async fn update_algo_orders(&mut self, entries: &[WsAlgoOrderEntry]) -> bool {
         let mut changed = false;
         for entry in entries {
             if !self.accepts(&entry.inst_id) {
