@@ -1909,12 +1909,19 @@ impl TuiApp {
         let datasets: Vec<Dataset> = views
             .iter()
             .map(|(inst_id, points, color)| {
-                Dataset::default()
-                    .name(self.legend_label(inst_id))
-                    .marker(symbols::Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(*color))
-                    .data(points.as_ref())
+                let d = Dataset::default();
+                if !(self.normalize || multi_axis_active) {
+                    d.name(self.legend_label(inst_id))
+                        .marker(symbols::Marker::Braille)
+                        .graph_type(GraphType::Line)
+                        .style(Style::default().fg(*color))
+                        .data(points.as_ref())
+                } else {
+                    d.marker(symbols::Marker::Braille)
+                        .graph_type(GraphType::Line)
+                        .style(Style::default().fg(*color))
+                        .data(points.as_ref())
+                }
             })
             .collect();
         let chart = Chart::new(datasets)
