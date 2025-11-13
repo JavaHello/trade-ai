@@ -2144,6 +2144,7 @@ dependencies = [
  "crossterm 0.29.0",
  "futures-util",
  "hmac",
+ "once_cell",
  "ratatui",
  "reqwest",
  "reqwest-websocket",

@@ -6,11 +6,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{SecondsFormat, Utc};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
+use once_cell::sync::Lazy;
 use reqwest::{Client, ClientBuilder};
 use reqwest_websocket::{Message, RequestBuilderExt, WebSocket};
 use serde::de::DeserializeOwned;
 use sha2::Sha256;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time::{Duration, interval, sleep};
 
 use crate::command::{
@@ -497,18 +498,14 @@ impl OkxPrivateWsClient {
         Ok(response.into_websocket().await?)
     }
 
-    pub async fn stream_account(&self, inst_ids: &[String]) -> Result<(), anyhow::Error> {
-        let filter = inst_filter(inst_ids);
+    pub async fn stream_account(&self) -> Result<(), anyhow::Error> {
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(32);
         loop {
             match self.connect().await {
                 Ok(websocket) => {
                     backoff = Duration::from_secs(1);
-                    if let Err(err) = self
-                        .run_private_stream(websocket, filter.clone(), inst_ids)
-                        .await
-                    {
+                    if let Err(err) = self.run_private_stream(websocket).await {
                         self.emit_error(format!("okx private ws error: {err}"));
                     } else {
                         backoff = Duration::from_secs(1);
@@ -523,30 +520,16 @@ impl OkxPrivateWsClient {
         }
     }
 
-    async fn run_private_stream(
-        &self,
-        websocket: WebSocket,
-        filter: Option<HashSet<String>>,
-        inst_ids: &[String],
-    ) -> Result<(), anyhow::Error> {
+    async fn run_private_stream(&self, websocket: WebSocket) -> Result<(), anyhow::Error> {
         let (mut ws_tx, mut ws_rx) = websocket.split();
         self.send_login(&mut ws_tx).await?;
         self.wait_for_login(&mut ws_tx, &mut ws_rx).await?;
         self.subscribe_private(&mut ws_tx).await?;
-        let mut state = AccountState::new(filter);
-        match fetch_account_snapshot(&self.config, inst_ids).await {
-            Ok(snapshot) => {
-                state.seed(&snapshot);
-                let _ = self.tx.send(Command::AccountSnapshot(snapshot));
-            }
-            Err(err) => {
-                self.emit_error(format!("failed to bootstrap account snapshot: {err}"));
-            }
-        }
+        let state = SharedAccountState::global();
         while let Some(result) = ws_rx.next().await {
             match result {
                 Ok(Message::Text(text)) => {
-                    self.handle_private_text(&text, &mut state)?;
+                    self.handle_private_text(&text, state).await?;
                 }
                 Ok(Message::Ping(payload)) => {
                     ws_tx.send(Message::Pong(payload)).await?;
@@ -660,10 +643,10 @@ impl OkxPrivateWsClient {
         Ok(())
     }
 
-    fn handle_private_text(
+    async fn handle_private_text(
         &self,
         text: &str,
-        state: &mut AccountState,
+        state: SharedAccountState,
     ) -> Result<(), anyhow::Error> {
         let value: serde_json::Value = match serde_json::from_str(text) {
             Ok(val) => val,
@@ -691,15 +674,13 @@ impl OkxPrivateWsClient {
         match channel.as_str() {
             "positions" => {
                 let message: PrivateDataMessage<WsPositionEntry> = serde_json::from_value(value)?;
-                if state.update_positions(&message.data) {
-                    let snapshot = state.snapshot();
+                if let Some(snapshot) = state.update_positions(&message.data).await {
                     let _ = self.tx.send(Command::AccountSnapshot(snapshot));
                 }
             }
             "orders" => {
                 let message: PrivateDataMessage<WsOrderEntry> = serde_json::from_value(value)?;
-                if state.update_orders(&message.data) {
-                    let snapshot = state.snapshot();
+                if let Some(snapshot) = state.update_orders(&message.data).await {
                     let _ = self.tx.send(Command::AccountSnapshot(snapshot));
                 }
             }
@@ -757,19 +738,15 @@ impl OkxBusinessWsClient {
         Ok(response.into_websocket().await?)
     }
 
-    pub async fn stream_business(&self, inst_ids: &[String]) -> Result<(), anyhow::Error> {
-        let filter = inst_filter(inst_ids);
+    pub async fn stream_business(&self) -> Result<(), anyhow::Error> {
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(32);
         loop {
             match self.connect().await {
                 Ok(websocket) => {
                     backoff = Duration::from_secs(1);
-                    if let Err(err) = self
-                        .run_business_stream(websocket, filter.clone(), inst_ids)
-                        .await
-                    {
-                        self.emit_error(format!("okx private ws error: {err}"));
+                    if let Err(err) = self.run_business_stream(websocket).await {
+                        self.emit_error(format!("okx business ws error: {err}"));
                     } else {
                         backoff = Duration::from_secs(1);
                     }
@@ -783,26 +760,12 @@ impl OkxBusinessWsClient {
         }
     }
 
-    async fn run_business_stream(
-        &self,
-        websocket: WebSocket,
-        filter: Option<HashSet<String>>,
-        inst_ids: &[String],
-    ) -> Result<(), anyhow::Error> {
+    async fn run_business_stream(&self, websocket: WebSocket) -> Result<(), anyhow::Error> {
         let (mut ws_tx, mut ws_rx) = websocket.split();
         self.send_login(&mut ws_tx).await?;
         self.wait_for_login(&mut ws_tx, &mut ws_rx).await?;
         self.subscribe_business(&mut ws_tx).await?;
-        let mut state = AccountState::new(filter);
-        match fetch_account_snapshot(&self.config, inst_ids).await {
-            Ok(snapshot) => {
-                state.seed(&snapshot);
-                let _ = self.tx.send(Command::AccountSnapshot(snapshot));
-            }
-            Err(err) => {
-                self.emit_error(format!("failed to bootstrap account snapshot: {err}"));
-            }
-        }
+        let state = SharedAccountState::global();
         let mut ping_interval = interval(Duration::from_secs(20));
         loop {
             tokio::select! {
@@ -812,7 +775,7 @@ impl OkxBusinessWsClient {
                 maybe_message = ws_rx.next() => {
                     match maybe_message {
                         Some(Ok(Message::Text(text))) => {
-                            self.handle_private_text(&text, &mut state)?;
+                            self.handle_private_text(&text, state).await?;
                         }
                         Some(Ok(Message::Ping(payload))) => {
                             ws_tx.send(Message::Pong(payload)).await?;
@@ -922,10 +885,10 @@ impl OkxBusinessWsClient {
         Ok(())
     }
 
-    fn handle_private_text(
+    async fn handle_private_text(
         &self,
         text: &str,
-        state: &mut AccountState,
+        state: SharedAccountState,
     ) -> Result<(), anyhow::Error> {
         let value: serde_json::Value = match serde_json::from_str(text) {
             Ok(val) => val,
@@ -953,8 +916,7 @@ impl OkxBusinessWsClient {
         match channel.as_str() {
             "orders-algo" => {
                 let message: PrivateDataMessage<WsAlgoOrderEntry> = serde_json::from_value(value)?;
-                if state.update_algo_orders(&message.data) {
-                    let snapshot = state.snapshot();
+                if let Some(snapshot) = state.update_algo_orders(&message.data).await {
                     let _ = self.tx.send(Command::AccountSnapshot(snapshot));
                 }
             }
@@ -1903,7 +1865,7 @@ fn inst_type_from_inst_id(inst_id: &str) -> Option<&'static str> {
     }
 }
 
-fn inst_filter(inst_ids: &[String]) -> Option<HashSet<String>> {
+pub fn inst_filter(inst_ids: &[String]) -> Option<HashSet<String>> {
     if inst_ids.is_empty() {
         None
     } else {
@@ -2182,6 +2144,62 @@ struct WsAlgoOrderEntry {
     sl_ord_px: Option<String>,
 }
 
+static GLOBAL_ACCOUNT_STATE: Lazy<Mutex<AccountState>> =
+    Lazy::new(|| Mutex::new(AccountState::new(None)));
+
+#[derive(Clone, Copy)]
+pub struct SharedAccountState {
+    inner: &'static Mutex<AccountState>,
+}
+
+impl SharedAccountState {
+    pub fn global() -> Self {
+        SharedAccountState {
+            inner: &GLOBAL_ACCOUNT_STATE,
+        }
+    }
+
+    pub async fn update_filter(&self, filter: Option<HashSet<String>>) {
+        if filter.is_none() {
+            return;
+        }
+        let mut state = self.inner.lock().await;
+        state.update_filter(filter);
+    }
+
+    pub async fn seed(&self, snapshot: &AccountSnapshot) {
+        let mut state = self.inner.lock().await;
+        state.seed(snapshot);
+    }
+
+    async fn update_positions(&self, entries: &[WsPositionEntry]) -> Option<AccountSnapshot> {
+        let mut state = self.inner.lock().await;
+        if state.update_positions(entries) {
+            Some(state.snapshot())
+        } else {
+            None
+        }
+    }
+
+    async fn update_orders(&self, entries: &[WsOrderEntry]) -> Option<AccountSnapshot> {
+        let mut state = self.inner.lock().await;
+        if state.update_orders(entries) {
+            Some(state.snapshot())
+        } else {
+            None
+        }
+    }
+
+    async fn update_algo_orders(&self, entries: &[WsAlgoOrderEntry]) -> Option<AccountSnapshot> {
+        let mut state = self.inner.lock().await;
+        if state.update_algo_orders(entries) {
+            Some(state.snapshot())
+        } else {
+            None
+        }
+    }
+}
+
 struct AccountState {
     filter: Option<HashSet<String>>,
     positions: HashMap<PositionKey, PositionInfo>,
@@ -2200,6 +2218,21 @@ impl AccountState {
             filter,
             positions: HashMap::new(),
             open_orders: HashMap::new(),
+        }
+    }
+
+    fn update_filter(&mut self, filter: Option<HashSet<String>>) {
+        if let Some(mut incoming) = filter {
+            match self.filter.as_mut() {
+                Some(existing) => {
+                    for inst in incoming.drain() {
+                        existing.insert(inst);
+                    }
+                }
+                None => {
+                    self.filter = Some(incoming);
+                }
+            }
         }
     }
 

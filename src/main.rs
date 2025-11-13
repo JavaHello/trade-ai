@@ -14,7 +14,9 @@ use tokio::task;
 
 use crate::command::{Command, TradingCommand};
 use crate::notify::OsNotification;
-use crate::okx::{OkxBusinessWsClient, OkxPrivateWsClient, OkxTradingClient, OkxWsClient};
+use crate::okx::{
+    OkxBusinessWsClient, OkxPrivateWsClient, OkxTradingClient, OkxWsClient, SharedAccountState,
+};
 use crate::tui::TuiApp;
 
 #[tokio::main]
@@ -49,6 +51,10 @@ async fn main() -> Result<(), anyhow::Error> {
         task::spawn(async move {
             match okx::fetch_account_snapshot(&snapshot_cfg, &inst_ids).await {
                 Ok(snapshot) => {
+                    let filter = okx::inst_filter(&inst_ids);
+                    let state = SharedAccountState::global();
+                    state.update_filter(filter).await;
+                    state.seed(&snapshot).await;
                     let _ = snapshot_tx.send(Command::AccountSnapshot(snapshot));
                 }
                 Err(err) => {
@@ -58,12 +64,11 @@ async fn main() -> Result<(), anyhow::Error> {
         });
     }
     if let Some(private_cfg) = trading_cfg.clone() {
-        let inst_ids = param.inst_ids.clone();
         let account_tx = tx.clone();
         task::spawn(async move {
             let result = async {
                 let client = OkxPrivateWsClient::new(private_cfg, account_tx.clone())?;
-                client.stream_account(&inst_ids).await
+                client.stream_account().await
             }
             .await;
             if let Err(err) = result {
@@ -73,11 +78,10 @@ async fn main() -> Result<(), anyhow::Error> {
     }
     if let Some(business_cfg) = trading_cfg.clone() {
         let business_tx = tx.clone();
-        let inst_ids = param.inst_ids.clone();
         task::spawn(async move {
             let result = async {
                 let client = OkxBusinessWsClient::new(business_cfg, business_tx.clone())?;
-                client.stream_business(&inst_ids).await
+                client.stream_business().await
             }
             .await;
             if let Err(err) = result {
