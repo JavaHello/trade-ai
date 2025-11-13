@@ -492,6 +492,9 @@ impl TradeState {
             TradeEvent::Cancel(cancel) => {
                 self.leverage_for_inst(&cancel.inst_id, cancel.pos_side.as_deref())
             }
+            TradeEvent::Fill(fill) => {
+                self.leverage_for_inst(&fill.inst_id, fill.pos_side.as_deref())
+            }
         }
     }
 
@@ -756,6 +759,26 @@ impl TuiApp {
                                         self.trade.remove_open_order(&cancel.ord_id);
                                     }
                                     (cancel.message.to_string(), !cancel.success)
+                                }
+                                TradeEvent::Fill(fill) => {
+                                    let size_label =
+                                        self.format_contract_size(&fill.inst_id, fill.size);
+                                    let price_label =
+                                        self.format_price_for(&fill.inst_id, fill.price);
+                                    let side_label = match fill.side {
+                                        TradeSide::Buy => "买入",
+                                        TradeSide::Sell => "卖出",
+                                    };
+                                    (
+                                        format!(
+                                            "{inst} {side} 成交 {size} @ {price}",
+                                            inst = fill.inst_id,
+                                            side = side_label,
+                                            size = size_label,
+                                            price = price_label,
+                                        ),
+                                        false,
+                                    )
                                 }
                             };
                             let event_for_log = event.clone();
@@ -1414,6 +1437,26 @@ impl TuiApp {
                     ),
                 ]
             }
+            TradeEvent::Fill(fill) => {
+                let side_label =
+                    Self::order_side_label(fill.side.as_okx_side(), fill.pos_side.as_deref());
+                let size_label = self.format_contract_size(&fill.inst_id, fill.size);
+                let price_label = self.format_price_for(&fill.inst_id, fill.price);
+                let exec_label = Self::exec_type_label(fill.exec_type.as_deref());
+                let order_short = Self::short_order_id(&fill.order_id);
+                vec![
+                    (ordinal_label, ColumnAlign::Right, 5, None),
+                    (time, ColumnAlign::Left, 8, None),
+                    ("成交".to_string(), ColumnAlign::Left, 4, None),
+                    (fill.inst_id.clone(), ColumnAlign::Left, 14, None),
+                    (side_label, ColumnAlign::Left, 10, None),
+                    (size_label, ColumnAlign::Right, 10, None),
+                    (price_label, ColumnAlign::Right, 10, None),
+                    (leverage_label, ColumnAlign::Right, 6, None),
+                    (exec_label.to_string(), ColumnAlign::Left, 6, None),
+                    (order_short, ColumnAlign::Left, 10, None),
+                ]
+            }
         }
     }
 
@@ -1455,6 +1498,22 @@ impl TuiApp {
 
     fn status_label(success: bool) -> &'static str {
         if success { "成功" } else { "失败" }
+    }
+
+    fn exec_type_label(exec_type: Option<&str>) -> &'static str {
+        match exec_type {
+            Some(value)
+                if value.eq_ignore_ascii_case("m") || value.eq_ignore_ascii_case("maker") =>
+            {
+                "挂单"
+            }
+            Some(value)
+                if value.eq_ignore_ascii_case("t") || value.eq_ignore_ascii_case("taker") =>
+            {
+                "吃单"
+            }
+            _ => "--",
+        }
     }
 
     fn pos_side_label(side: Option<&str>) -> &'static str {
@@ -1751,6 +1810,62 @@ impl TuiApp {
                     Self::operator_label(&cancel.operator)
                 )));
                 ("撤单详情", cancel.success, cancel.message.clone())
+            }
+            TradeEvent::Fill(fill) => {
+                lines.push(Line::from(format!("合约 {}", fill.inst_id.clone())));
+                lines.push(Line::from(format!(
+                    "方向 {} · 数量 {}",
+                    Self::side_label(fill.side),
+                    self.format_contract_size(&fill.inst_id, fill.size),
+                )));
+                lines.push(Line::from(format!(
+                    "价格 {}",
+                    self.format_price_for(&fill.inst_id, fill.price),
+                )));
+                lines.push(Line::from(format!(
+                    "成交类型 {}",
+                    Self::exec_type_label(fill.exec_type.as_deref()),
+                )));
+                lines.push(Line::from(format!(
+                    "订单 {}",
+                    Self::short_order_id(&fill.order_id)
+                )));
+                if let Some(trade_id) = &fill.trade_id {
+                    lines.push(Line::from(format!("成交ID {}", trade_id)));
+                }
+                if let Some(acc) = fill.acc_fill_size {
+                    lines.push(Line::from(format!(
+                        "累计成交 {}",
+                        self.format_contract_size(&fill.inst_id, acc),
+                    )));
+                }
+                if let Some(avg_price) = fill.avg_price {
+                    lines.push(Line::from(format!(
+                        "均价 {}",
+                        self.format_price_for(&fill.inst_id, avg_price),
+                    )));
+                }
+                if let Some(tag) = fill.tag.as_deref().filter(|tag| !tag.is_empty()) {
+                    lines.push(Line::from(format!("标签 {}", tag)));
+                }
+                if let Some(fee) = fill.fee {
+                    let ccy = fill.fee_currency.as_deref().unwrap_or("--");
+                    lines.push(Line::from(format!("手续费 {} {}", fee, ccy)));
+                }
+                if let Some(pnl) = fill.pnl {
+                    lines.push(Line::from(format!("PNL {}", pnl)));
+                }
+                (
+                    "成交详情",
+                    true,
+                    format!(
+                        "{inst} {side} 成交 {size} @ {price}",
+                        inst = fill.inst_id,
+                        side = Self::side_label(fill.side),
+                        size = self.format_contract_size(&fill.inst_id, fill.size),
+                        price = self.format_price_for(&fill.inst_id, fill.price),
+                    ),
+                )
             }
         };
         lines.push(Line::from(format!(

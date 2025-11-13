@@ -101,9 +101,41 @@ pub struct TradeResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TradeFill {
+    pub inst_id: String,
+    pub side: TradeSide,
+    pub price: f64,
+    pub size: f64,
+    pub order_id: String,
+    #[serde(default)]
+    pub pos_side: Option<String>,
+    #[serde(default)]
+    pub trade_id: Option<String>,
+    #[serde(default)]
+    pub exec_type: Option<String>,
+    #[serde(default)]
+    pub fill_time: Option<i64>,
+    #[serde(default)]
+    pub fee: Option<f64>,
+    #[serde(default)]
+    pub fee_currency: Option<String>,
+    #[serde(default)]
+    pub pnl: Option<f64>,
+    #[serde(default)]
+    pub acc_fill_size: Option<f64>,
+    #[serde(default)]
+    pub avg_price: Option<f64>,
+    #[serde(default)]
+    pub leverage: Option<f64>,
+    #[serde(default)]
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TradeEvent {
     Order(TradeResponse),
     Cancel(CancelResponse),
+    Fill(TradeFill),
 }
 
 impl TradeEvent {
@@ -111,6 +143,7 @@ impl TradeEvent {
         match self {
             TradeEvent::Order(response) => response.leverage,
             TradeEvent::Cancel(_) => None,
+            TradeEvent::Fill(fill) => fill.leverage,
         }
     }
 }

@@ -16,8 +16,8 @@ use tokio::time::{Duration, interval, sleep};
 
 use crate::command::{
     AccountSnapshot, CancelOrderRequest, CancelResponse, Command, PendingOrderInfo, PositionInfo,
-    PricePoint, SetLeverageRequest, TradeEvent, TradeOrderKind, TradeRequest, TradeResponse,
-    TradeSide, TradingCommand,
+    PricePoint, SetLeverageRequest, TradeEvent, TradeFill, TradeOrderKind, TradeRequest,
+    TradeResponse, TradeSide, TradingCommand,
 };
 use crate::config::TradingConfig;
 
@@ -682,6 +682,7 @@ impl OkxPrivateWsClient {
             }
             "orders" => {
                 let message: PrivateDataMessage<WsOrderEntry> = serde_json::from_value(value)?;
+                self.publish_order_fills(&message.data);
                 if let Some(snapshot) = state.update_orders(&message.data).await {
                     let _ = self.tx.send(Command::AccountSnapshot(snapshot));
                 }
@@ -711,6 +712,14 @@ impl OkxPrivateWsClient {
             _ => {}
         }
         Ok(())
+    }
+
+    fn publish_order_fills(&self, entries: &[WsOrderEntry]) {
+        for entry in entries {
+            if let Some(fill) = build_trade_fill(entry) {
+                let _ = self.tx.send(Command::TradeResult(TradeEvent::Fill(fill)));
+            }
+        }
     }
 }
 impl OkxBusinessWsClient {
@@ -1911,6 +1920,50 @@ fn parse_bool_flag(value: &Option<serde_json::Value>) -> bool {
     }
 }
 
+fn parse_optional_i64(value: Option<String>) -> Option<i64> {
+    value?.trim().parse::<i64>().ok()
+}
+
+fn parse_okx_trade_side(value: &str) -> Option<TradeSide> {
+    if value.eq_ignore_ascii_case("buy") {
+        Some(TradeSide::Buy)
+    } else if value.eq_ignore_ascii_case("sell") {
+        Some(TradeSide::Sell)
+    } else {
+        None
+    }
+}
+
+fn build_trade_fill(entry: &WsOrderEntry) -> Option<TradeFill> {
+    let fill_size = parse_optional_float(entry.fill_sz.clone()).unwrap_or(0.0);
+    if fill_size <= 0.0 {
+        return None;
+    }
+    let side = parse_okx_trade_side(&entry.side)?;
+    let price = parse_optional_float(entry.fill_px.clone())
+        .or_else(|| parse_optional_float(entry.avg_px.clone()))
+        .or_else(|| parse_optional_float(entry.px.clone()))
+        .unwrap_or(0.0);
+    Some(TradeFill {
+        inst_id: entry.inst_id.clone(),
+        side,
+        price,
+        size: fill_size,
+        order_id: entry.ord_id.clone(),
+        pos_side: entry.pos_side.clone(),
+        trade_id: entry.trade_id.clone(),
+        exec_type: entry.exec_type.clone(),
+        fill_time: parse_optional_i64(entry.fill_time.clone()),
+        fee: parse_optional_float(entry.fill_fee.clone()),
+        fee_currency: entry.fill_fee_ccy.clone(),
+        pnl: parse_optional_float(entry.pnl.clone()),
+        acc_fill_size: parse_optional_float(entry.acc_fill_sz.clone()),
+        avg_price: parse_optional_float(entry.avg_px.clone()),
+        leverage: parse_optional_float(entry.lever.clone()),
+        tag: entry.tag.clone(),
+    })
+}
+
 fn determine_trade_order_kind(
     tp_trigger: Option<&str>,
     sl_trigger: Option<&str>,
@@ -2220,6 +2273,26 @@ struct WsOrderEntry {
     tag: Option<String>,
     #[serde(default)]
     lever: Option<String>,
+    #[serde(default)]
+    avg_px: Option<String>,
+    #[serde(default)]
+    acc_fill_sz: Option<String>,
+    #[serde(default)]
+    fill_px: Option<String>,
+    #[serde(default)]
+    fill_sz: Option<String>,
+    #[serde(default)]
+    fill_time: Option<String>,
+    #[serde(default)]
+    fill_fee: Option<String>,
+    #[serde(default)]
+    fill_fee_ccy: Option<String>,
+    #[serde(default)]
+    pnl: Option<String>,
+    #[serde(default)]
+    trade_id: Option<String>,
+    #[serde(default)]
+    exec_type: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]

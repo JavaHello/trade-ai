@@ -17,8 +17,18 @@ pub struct TradeLogEntry {
 
 impl TradeLogEntry {
     pub fn from_event(event: TradeEvent, leverage: Option<f64>) -> Self {
+        let timestamp = match &event {
+            TradeEvent::Fill(fill) => fill
+                .fill_time
+                .and_then(|ms| match Local.timestamp_millis_opt(ms) {
+                    LocalResult::Single(dt) => Some(dt),
+                    _ => None,
+                })
+                .unwrap_or_else(Local::now),
+            _ => Local::now(),
+        };
         TradeLogEntry {
-            timestamp: Local::now(),
+            timestamp,
             event,
             leverage,
         }
