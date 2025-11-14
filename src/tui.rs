@@ -2236,6 +2236,24 @@ impl TuiApp {
             }
         }
         lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "[Justification]",
+            Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(justification) = entry.justification.as_deref() {
+            if justification.trim().is_empty() {
+                lines.push(Line::from("--"));
+            } else {
+                for line in justification.lines() {
+                    lines.push(Line::from(line));
+                }
+            }
+        } else {
+            lines.push(Line::from("未解析到 justification 字段"));
+        }
+        lines.push(Line::from(""));
         lines.push(Line::from("按 o 关闭 · 原文仅供参考"));
         let content_height = popup_height.saturating_sub(2);
         let content_width = popup_width.saturating_sub(2).max(1);

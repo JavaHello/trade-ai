@@ -66,7 +66,7 @@ const SYSTEM_PROMPT: &str = r#"
 仓位规模（币种）= 仓位规模（美元）/ 当前价格
 ## 仓位规模注意事项
 
-1. **可用资金**：仅使用可用资金（而非账户余额）
+1. **可用资金**：仅使用可用资金 USDT（而非账户余额）
 2. **杠杆选择**：
 - 低信心（0.3-0.5）：使用 1-3 倍杠杆
 - 中等信心（0.5-0.7）：使用 3-8 倍杠杆
@@ -115,7 +115,7 @@ const SYSTEM_PROMPT: &str = r#"
 "invalidation_condition": "<string>",
 "confidence": <float 0-1>,
 "risk_usd": <float>,
-"justification": "<string>"
+"justification": "<string>" // 使用中文输出
 }
 ```
 
@@ -334,7 +334,8 @@ impl DeepseekReporter {
             kind: TradeOrderKind::Regular,
         };
         self.submit_trade_request(request.clone()).await?;
-        self.place_protective_orders(&request, price, decision).await
+        self.place_protective_orders(&request, price, decision)
+            .await
     }
 
     async fn place_protective_orders(
@@ -540,11 +541,13 @@ fn determine_close_side(position: &PositionInfo) -> (TradeSide, Option<String>) 
 fn determine_entry_pos_side(inst_id: &str, side: TradeSide) -> Option<String> {
     let upper = inst_id.to_ascii_uppercase();
     if upper.ends_with("-SWAP") || upper.ends_with("-FUTURES") {
-        return Some(match side {
-            TradeSide::Buy => "long",
-            TradeSide::Sell => "short",
-        }
-        .to_string());
+        return Some(
+            match side {
+                TradeSide::Buy => "long",
+                TradeSide::Sell => "short",
+            }
+            .to_string(),
+        );
     }
     None
 }

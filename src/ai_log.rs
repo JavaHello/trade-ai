@@ -14,6 +14,7 @@ pub struct AiDecisionRecord {
     pub system_prompt: String,
     pub user_prompt: String,
     pub response: String,
+    pub justification: Option<String>,
 }
 
 impl AiDecisionRecord {
@@ -22,15 +23,23 @@ impl AiDecisionRecord {
             LocalResult::Single(dt) => dt,
             _ => Local::now(),
         };
+        let justification = Self::compute_justification(&payload.response, None);
         AiDecisionRecord {
             timestamp,
             system_prompt: payload.system_prompt,
             user_prompt: payload.user_prompt,
             response: payload.response,
+            justification,
         }
     }
 
     pub fn summary(&self) -> String {
+        if let Some(justification) = self.justification.as_deref() {
+            let trimmed = justification.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
         let mut fragments = self
             .response
             .lines()
@@ -60,21 +69,53 @@ impl AiDecisionRecord {
         system_prompt: String,
         user_prompt: String,
         response: String,
+        justification: Option<String>,
     ) -> Self {
         let timestamp = match Local.timestamp_millis_opt(timestamp_ms) {
             LocalResult::Single(dt) => dt,
             _ => Local::now(),
         };
+        let justification = Self::compute_justification(&response, justification);
         AiDecisionRecord {
             timestamp,
             system_prompt,
             user_prompt,
             response,
+            justification,
         }
     }
 
     fn timestamp_ms(&self) -> i64 {
         self.timestamp.timestamp_millis()
+    }
+
+    fn compute_justification(response: &str, provided: Option<String>) -> Option<String> {
+        let normalized = provided
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        normalized.or_else(|| Self::extract_justification(response))
+    }
+
+    fn extract_justification(response: &str) -> Option<String> {
+        fn parse_block(block: &str) -> Option<String> {
+            let value: serde_json::Value = serde_json::from_str(block).ok()?;
+            let justification = value.get("justification")?;
+            let text = justification.as_str()?.trim();
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
+        }
+        parse_block(response).or_else(|| {
+            let start = response.find('{')?;
+            let end = response.rfind('}')?;
+            if end <= start {
+                return None;
+            }
+            let slice = response.get(start..=end)?;
+            parse_block(slice)
+        })
     }
 }
 
@@ -186,6 +227,8 @@ struct StoredAiDecision {
     system_prompt: String,
     user_prompt: String,
     response: String,
+    #[serde(default)]
+    justification: Option<String>,
 }
 
 impl StoredAiDecision {
@@ -195,6 +238,7 @@ impl StoredAiDecision {
             self.system_prompt,
             self.user_prompt,
             self.response,
+            self.justification,
         )
     }
 }
@@ -206,6 +250,7 @@ impl From<&AiDecisionRecord> for StoredAiDecision {
             system_prompt: value.system_prompt.clone(),
             user_prompt: value.user_prompt.clone(),
             response: value.response.clone(),
+            justification: value.justification.clone(),
         }
     }
 }
