@@ -33,6 +33,29 @@ cargo run --release -- \
 默认为 `cross`，可按需切换为 `isolated` 或 `cash`。一旦配置完成，交易页面的委托将直接发送到 OKX
 实盘/模拟账户（取决于 API 权限），请谨慎操作。
 
+## Deepseek 智能分析
+
+若同时配置了 OKX API 与 Deepseek API，程序会定期（默认 5 分钟）抓取当前持仓、挂单和各币种资金情况，
+并将快照发送给 Deepseek 生成中文结论，结论会显示在 TUI 底部的状态栏。可以通过环境变量或命令行参数启用：
+
+```bash
+cargo run --release -- \
+  --okx-api-key "$OKX_API_KEY" \
+  --okx-api-secret "$OKX_API_SECRET" \
+  --okx-api-passphrase "$OKX_API_PASSPHRASE" \
+  --deepseek-api-key "$DEEPSEEK_API_KEY" \
+  --deepseek-interval 10m
+```
+
+支持的参数：
+
+- `--deepseek-api-key` / `DEEPSEEK_API_KEY`：Deepseek API Key（必填）
+- `--deepseek-model` / `DEEPSEEK_MODEL`：模型名称，默认 `deepseek-chat`
+- `--deepseek-endpoint` / `DEEPSEEK_API_BASE`：API 基础地址，默认 `https://api.deepseek.com`
+- `--deepseek-interval`：提交频率（如 `5m`、`15m`、`1h`）
+
+Deepseek 集成仅在成功加载 OKX 账户信息后激活，若账户数据为空则会跳过本次请求。
+
 ## 快速开始
 
 ```bash

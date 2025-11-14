@@ -2480,6 +2480,11 @@ impl SharedAccountState {
         state.seed(snapshot);
     }
 
+    pub async fn snapshot(&self) -> AccountSnapshot {
+        let state = self.inner.lock().await;
+        state.snapshot()
+    }
+
     async fn update_positions(&self, entries: &[WsPositionEntry]) -> Option<AccountSnapshot> {
         let mut state = self.inner.lock().await;
         if state.update_positions(entries).await {

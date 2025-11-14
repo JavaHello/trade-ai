@@ -43,6 +43,34 @@ pub struct CliParams {
         value_parser = ["cash", "cross", "isolated"]
     )]
     pub okx_td_mode: String,
+
+    /// Deepseek API key used for AI analysis of account states
+    #[clap(long = "deepseek-api-key", env = "DEEPSEEK_API_KEY")]
+    pub deepseek_api_key: Option<String>,
+
+    /// Deepseek model name for chat completions
+    #[clap(
+        long = "deepseek-model",
+        env = "DEEPSEEK_MODEL",
+        default_value = "deepseek-chat"
+    )]
+    pub deepseek_model: String,
+
+    /// Deepseek endpoint base URL (default https://api.deepseek.com)
+    #[clap(
+        long = "deepseek-endpoint",
+        env = "DEEPSEEK_API_BASE",
+        default_value = "https://api.deepseek.com"
+    )]
+    pub deepseek_endpoint: String,
+
+    /// Interval between Deepseek summaries (e.g., 5m, 15m, 1h)
+    #[clap(
+        long = "deepseek-interval",
+        value_name = "DURATION",
+        default_value = "5m"
+    )]
+    pub deepseek_interval: DurationSpec,
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +148,24 @@ impl CliParams {
             td_mode: self.okx_td_mode.clone(),
         })
     }
+
+    pub fn deepseek_config(&self) -> Option<DeepseekConfig> {
+        let api_key = self.deepseek_api_key.as_ref()?.trim();
+        if api_key.is_empty() {
+            return None;
+        }
+        let endpoint = normalize_endpoint(self.deepseek_endpoint.trim());
+        let model = self.deepseek_model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        Some(DeepseekConfig {
+            api_key: api_key.to_string(),
+            endpoint,
+            model: model.to_string(),
+            interval: self.deepseek_interval.as_duration(),
+        })
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -191,4 +237,21 @@ pub struct TradingConfig {
     pub api_secret: String,
     pub passphrase: String,
     pub td_mode: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct DeepseekConfig {
+    pub api_key: String,
+    pub endpoint: String,
+    pub model: String,
+    pub interval: Duration,
+}
+
+fn normalize_endpoint(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        "https://api.deepseek.com".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }

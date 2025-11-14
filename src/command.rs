@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub enum Command {
     MarkPriceUpdate(String, f64, i64, usize),
     Notify(String, String),
+    AiInsight(String),
     Error(String),
     TradeResult(TradeEvent),
     AccountSnapshot(AccountSnapshot),

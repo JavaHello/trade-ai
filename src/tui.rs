@@ -775,13 +775,21 @@ impl TuiApp {
                                 self.last_draw = Instant::now();
                             }
                         }
-                        Ok(Command::Error(message)) => {
-                            self.set_error_status_message(message);
+                        Ok(Command::Notify(inst_id, message)) => {
+                            self.set_status_message(format!("{inst_id}: {message}"));
                             terminal.draw(|frame| self.render(frame))?;
                             self.last_draw = Instant::now();
                         }
-                        Ok(Command::Notify(inst_id, message)) => {
-                            self.set_status_message(format!("{inst_id}: {message}"));
+                        Ok(Command::AiInsight(message)) => {
+                            self.status_message = Some(format!("Deepseek:\n{message}"));
+                            self.status_visible_until =
+                                Some(Instant::now() + Duration::from_secs(15));
+                            self.status_is_error = false;
+                            terminal.draw(|frame| self.render(frame))?;
+                            self.last_draw = Instant::now();
+                        }
+                        Ok(Command::Error(message)) => {
+                            self.set_error_status_message(message);
                             terminal.draw(|frame| self.render(frame))?;
                             self.last_draw = Instant::now();
                         }

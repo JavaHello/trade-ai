@@ -1,5 +1,6 @@
 mod command;
 mod config;
+mod deepseek;
 mod monitor;
 mod notify;
 mod okx;
@@ -15,6 +16,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task;
 
 use crate::command::{Command, TradingCommand};
+use crate::deepseek::DeepseekReporter;
 use crate::notify::OsNotification;
 use crate::okx::{
     OkxBusinessWsClient, OkxPrivateWsClient, OkxTradingClient, OkxWsClient, SharedAccountState,
@@ -24,8 +26,14 @@ use crate::tui::TuiApp;
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let param = config::CliParams::parse();
+    let deepseek_cfg = param.deepseek_config();
     let (tx, mut rx) = broadcast::channel::<Command>(16);
     let trading_cfg = param.trading_config();
+    if deepseek_cfg.is_some() && trading_cfg.is_none() {
+        let _ = tx.send(Command::Error(
+            "已启用 Deepseek 集成，但缺少 OKX API 配置，无法获取账户信息".to_string(),
+        ));
+    }
     let markets = if let Some(cfg) = trading_cfg.clone() {
         let inst_ids = param.inst_ids.clone();
         okx::fetch_market_info(&param.okx_td_mode, &cfg, &inst_ids).await?
@@ -94,6 +102,24 @@ async fn main() -> Result<(), anyhow::Error> {
             .await;
             if let Err(err) = result {
                 let _ = business_tx.send(Command::Error(format!("okx business ws error: {err}")));
+            }
+        });
+    }
+    if let (Some(cfg), Some(_)) = (deepseek_cfg.clone(), trading_cfg.clone()) {
+        let deepseek_tx = tx.clone();
+        task::spawn(async move {
+            let state = SharedAccountState::global();
+            match DeepseekReporter::new(cfg, state, deepseek_tx.clone()) {
+                Ok(reporter) => {
+                    let exit_rx = deepseek_tx.subscribe();
+                    if let Err(err) = reporter.run(exit_rx).await {
+                        let _ = deepseek_tx
+                            .send(Command::Error(format!("Deepseek reporter error: {err}")));
+                    }
+                }
+                Err(err) => {
+                    let _ = deepseek_tx.send(Command::Error(format!("Deepseek 初始化失败: {err}")));
+                }
             }
         });
     }
