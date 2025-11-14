@@ -187,6 +187,25 @@ pub struct SetLeverageRequest {
 pub struct AccountSnapshot {
     pub positions: Vec<PositionInfo>,
     pub open_orders: Vec<PendingOrderInfo>,
+    #[serde(default)]
+    pub balance: AccountBalance,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccountBalance {
+    pub total_equity: Option<f64>,
+    pub delta: Vec<AccountBalanceDelta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccountBalanceDelta {
+    pub currency: String,
+    #[serde(default)]
+    pub cash_balance: Option<f64>,
+    #[serde(default)]
+    pub equity: Option<f64>,
+    #[serde(default)]
+    pub available: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -15,9 +15,9 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time::{Duration, interval, sleep};
 
 use crate::command::{
-    AccountSnapshot, CancelOrderRequest, CancelResponse, Command, PendingOrderInfo, PositionInfo,
-    PricePoint, SetLeverageRequest, TradeEvent, TradeFill, TradeOrderKind, TradeRequest,
-    TradeResponse, TradeSide, TradingCommand,
+    AccountBalance, AccountBalanceDelta, AccountSnapshot, CancelOrderRequest, CancelResponse,
+    Command, PendingOrderInfo, PositionInfo, PricePoint, SetLeverageRequest, TradeEvent, TradeFill,
+    TradeOrderKind, TradeRequest, TradeResponse, TradeSide, TradingCommand,
 };
 use crate::config::TradingConfig;
 
@@ -91,6 +91,7 @@ const TRADE_ORDER_ALGO_ENDPOINT: &str = "/api/v5/trade/order-algo";
 const CANCEL_ORDER_ENDPOINT: &str = "/api/v5/trade/cancel-order";
 const CANCEL_ALGO_ORDER_ENDPOINT: &str = "/api/v5/trade/cancel-algos";
 const SET_LEVERAGE_ENDPOINT: &str = "/api/v5/account/set-leverage";
+const ACCOUNT_BALANCE_ENDPOINT: &str = "/api/v5/account/balance";
 const POSITIONS_ENDPOINT: &str = "/api/v5/account/positions";
 const ORDERS_PENDING_ENDPOINT: &str = "/api/v5/trade/orders-pending";
 const ORDERS_ALGO_PENDING_ENDPOINT: &str = "/api/v5/trade/orders-algo-pending";
@@ -640,6 +641,10 @@ impl OkxPrivateWsClient {
                 channel: "orders".to_string(),
                 inst_type: Some("ANY".to_string()),
             },
+            PrivateSubscribeArg {
+                channel: "account".to_string(),
+                inst_type: None,
+            },
         ];
         let payload = serde_json::to_string(&PrivateSubscribeMessage {
             id: None,
@@ -692,6 +697,12 @@ impl OkxPrivateWsClient {
                 let message: PrivateDataMessage<WsOrderEntry> = serde_json::from_value(value)?;
                 self.publish_order_fills(&message.data);
                 if let Some(snapshot) = state.update_orders(&message.data).await {
+                    let _ = self.tx.send(Command::AccountSnapshot(snapshot));
+                }
+            }
+            "account" => {
+                let message: PrivateDataMessage<WsAccountEntry> = serde_json::from_value(value)?;
+                if let Some(snapshot) = state.update_balances(&message.data).await {
                     let _ = self.tx.send(Command::AccountSnapshot(snapshot));
                 }
             }
@@ -1734,9 +1745,11 @@ pub async fn fetch_account_snapshot(
     open_orders.append(&mut algo_orders);
     open_orders.sort_by(|a, b| a.inst_id.cmp(&b.inst_id));
     positions.sort_by(|a, b| a.inst_id.cmp(&b.inst_id));
+    let balance = fetch_account_balances(&client, config).await?;
     Ok(AccountSnapshot {
         positions,
         open_orders,
+        balance,
     })
 }
 
@@ -1903,6 +1916,31 @@ async fn build_pending_order_from_algo(entry: OkxPendingAlgoOrderEntry) -> Pendi
     }
 }
 
+async fn fetch_account_balances(
+    client: &Client,
+    config: &TradingConfig,
+) -> Result<AccountBalance, anyhow::Error> {
+    let mut balance = AccountBalance::default();
+    let response: AccountBalanceResponse =
+        signed_get(client, config, ACCOUNT_BALANCE_ENDPOINT, &[]).await?;
+    if response.code != "0" {
+        return Err(anyhow!(
+            "okx balance error (code {}): {}",
+            response.code,
+            response.msg
+        ));
+    }
+    balance.total_equity = parse_optional_float(
+        response
+            .data
+            .get(0)
+            .and_then(|entry| entry.total_eq.clone()),
+    );
+    balance.delta =
+        aggregate_balance_details(response.data.iter().flat_map(|entry| entry.details.iter()));
+    Ok(balance)
+}
+
 fn parse_optional_float(value: Option<String>) -> Option<f64> {
     value.as_deref().and_then(parse_float_str)
 }
@@ -1925,6 +1963,47 @@ fn parse_bool_flag(value: &Option<serde_json::Value>) -> bool {
         }
         Some(serde_json::Value::Number(num)) => num.as_i64().map(|n| n != 0).unwrap_or(false),
         _ => false,
+    }
+}
+
+fn aggregate_balance_details<'a, I>(details: I) -> Vec<AccountBalanceDelta>
+where
+    I: Iterator<Item = &'a BalanceDetail>,
+{
+    let mut map: HashMap<String, AccountBalanceDelta> = HashMap::new();
+    for detail in details {
+        let entry = map
+            .entry(detail.ccy.clone())
+            .or_insert(AccountBalanceDelta {
+                currency: detail.ccy.clone(),
+                cash_balance: None,
+                equity: None,
+                available: None,
+            });
+        accumulate_balance(
+            &mut entry.cash_balance,
+            parse_optional_float(detail.cash_bal.clone()),
+        );
+        accumulate_balance(&mut entry.equity, parse_optional_float(detail.eq.clone()));
+        let available = parse_optional_float(detail.avail_eq.clone())
+            .or_else(|| parse_optional_float(detail.avail_bal.clone()));
+        accumulate_balance(&mut entry.available, available);
+    }
+    let mut balances: Vec<_> = map.into_values().collect();
+    balances.sort_by(|a, b| a.currency.cmp(&b.currency));
+    balances
+}
+
+fn accumulate_balance(target: &mut Option<f64>, value: Option<f64>) {
+    if let Some(val) = value {
+        match target {
+            Some(existing) => {
+                *existing += val;
+            }
+            None => {
+                *target = Some(val);
+            }
+        }
     }
 }
 
@@ -2191,6 +2270,37 @@ struct OkxPendingAlgoOrderEntry {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AccountBalanceResponse {
+    code: String,
+    msg: String,
+    data: Vec<AccountBalanceData>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountBalanceData {
+    #[serde(default)]
+    total_eq: Option<String>,
+    #[serde(default)]
+    details: Vec<BalanceDetail>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BalanceDetail {
+    ccy: String,
+    #[serde(default)]
+    cash_bal: Option<String>,
+    #[serde(default)]
+    avail_bal: Option<String>,
+    #[serde(default)]
+    avail_eq: Option<String>,
+    #[serde(default)]
+    eq: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct InstrumentsResponse {
     code: String,
     msg: String,
@@ -2305,6 +2415,15 @@ struct WsOrderEntry {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WsAccountEntry {
+    #[serde(default)]
+    total_eq: Option<String>,
+    #[serde(default)]
+    details: Vec<BalanceDetail>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WsAlgoOrderEntry {
     inst_id: String,
     algo_id: String,
@@ -2387,6 +2506,15 @@ impl SharedAccountState {
             None
         }
     }
+
+    async fn update_balances(&self, entries: &[WsAccountEntry]) -> Option<AccountSnapshot> {
+        let mut state = self.inner.lock().await;
+        if state.update_balances(entries) {
+            Some(state.snapshot())
+        } else {
+            None
+        }
+    }
 }
 #[derive(Debug, Clone)]
 pub struct MarketInfo {
@@ -2398,6 +2526,7 @@ struct AccountState {
     filter: Option<HashSet<String>>,
     positions: HashMap<PositionKey, PositionInfo>,
     open_orders: HashMap<String, PendingOrderInfo>,
+    balance: AccountBalance,
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -2412,6 +2541,7 @@ impl AccountState {
             filter,
             positions: HashMap::new(),
             open_orders: HashMap::new(),
+            balance: AccountBalance::default(),
         }
     }
 
@@ -2433,6 +2563,7 @@ impl AccountState {
     fn seed(&mut self, snapshot: &AccountSnapshot) {
         self.positions.clear();
         self.open_orders.clear();
+        self.balance = snapshot.balance.clone();
         for position in &snapshot.positions {
             if !self.accepts(&position.inst_id) {
                 continue;
@@ -2626,6 +2757,20 @@ impl AccountState {
         changed
     }
 
+    fn update_balances(&mut self, entries: &[WsAccountEntry]) -> bool {
+        self.balance.total_equity = entries
+            .get(0)
+            .and_then(|entry| parse_optional_float(entry.total_eq.clone()));
+        let balances =
+            aggregate_balance_details(entries.iter().flat_map(|entry| entry.details.iter()));
+        if balances != self.balance.delta {
+            self.balance.delta = balances;
+            true
+        } else {
+            false
+        }
+    }
+
     fn snapshot(&self) -> AccountSnapshot {
         let mut positions: Vec<_> = self.positions.values().cloned().collect();
         positions.sort_by(|a, b| {
@@ -2642,6 +2787,7 @@ impl AccountState {
         AccountSnapshot {
             positions,
             open_orders,
+            balance: self.balance.clone(),
         }
     }
 }

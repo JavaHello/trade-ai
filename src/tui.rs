@@ -19,9 +19,9 @@ use tokio::sync::{broadcast, mpsc};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::{
-    AccountSnapshot, CancelOrderRequest, Command, PendingOrderInfo, PositionInfo, PricePoint,
-    SetLeverageRequest, TradeEvent, TradeOperator, TradeOrderKind, TradeRequest, TradeSide,
-    TradingCommand,
+    AccountBalance, AccountSnapshot, CancelOrderRequest, Command, PendingOrderInfo, PositionInfo,
+    PricePoint, SetLeverageRequest, TradeEvent, TradeOperator, TradeOrderKind, TradeRequest,
+    TradeSide, TradingCommand,
 };
 use crate::okx::MarketInfo;
 use crate::trade_log::{TradeLogEntry, TradeLogStore};
@@ -124,6 +124,7 @@ struct TradeState {
     log_store: Option<TradeLogStore>,
     log_detail: Option<TradeLogEntry>,
     markets: HashMap<String, MarketInfo>,
+    balance: AccountBalance,
 }
 
 impl TradeState {
@@ -149,6 +150,7 @@ impl TradeState {
             log_store,
             log_detail: None,
             markets,
+            balance: AccountBalance::default(),
         }
     }
 
@@ -308,6 +310,7 @@ impl TradeState {
     fn update_snapshot(&mut self, snapshot: AccountSnapshot, inst_ids: &[String]) {
         self.positions = snapshot.positions;
         self.open_orders = snapshot.open_orders;
+        self.balance = snapshot.balance;
         self.ensure_selection(inst_ids);
     }
 
@@ -360,6 +363,39 @@ impl TradeState {
             TradeFocus::Positions => "持仓",
             TradeFocus::Orders => "挂单",
             TradeFocus::Logs => "委托记录",
+        }
+    }
+
+    fn balance_lines(&self) -> Vec<String> {
+        if let Some(line) = self.balance_summary_line() {
+            vec![line]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn balance_summary_line(&self) -> Option<String> {
+        if self.balance.total_equity.is_none() && self.balance.delta.is_empty() {
+            return None;
+        }
+        let mut segments = Vec::new();
+        if let Some(total) = self.balance.total_equity {
+            segments.push(format!(
+                "总权益: {} USDT",
+                Self::format_balance_amount(total)
+            ));
+        }
+        Some(format!("账户余额：{}", segments.join(" · ")))
+    }
+
+    fn format_balance_amount(value: f64) -> String {
+        let abs = value.abs();
+        if abs >= 1000.0 {
+            format!("{value:.2}")
+        } else if abs >= 1.0 {
+            format!("{value:.4}")
+        } else {
+            format!("{value:.6}")
         }
     }
 
@@ -933,7 +969,9 @@ impl TuiApp {
             return;
         }
         let instruction_lines = self.trade_instruction_lines();
-        let header_height = Self::trade_header_height(instruction_lines.len());
+        let balance_lines = self.trade.balance_lines();
+        let header_height =
+            Self::trade_header_height(instruction_lines.len() + balance_lines.len());
         if area.height < header_height {
             return;
         }
@@ -947,7 +985,7 @@ impl TuiApp {
                     Constraint::Min(4),
                 ])
                 .split(area);
-            self.render_trade_header(frame, chunks[0], &instruction_lines);
+            self.render_trade_header(frame, chunks[0], &instruction_lines, &balance_lines);
             self.render_account_snapshot(frame, chunks[1]);
             self.render_trade_activity(frame, chunks[2]);
         } else {
@@ -955,7 +993,7 @@ impl TuiApp {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(header_height), Constraint::Min(4)])
                 .split(area);
-            self.render_trade_header(frame, chunks[0], &instruction_lines);
+            self.render_trade_header(frame, chunks[0], &instruction_lines, &balance_lines);
             self.render_trade_activity(frame, chunks[1]);
         }
     }
@@ -1196,7 +1234,13 @@ impl TuiApp {
         frame.render_widget(paragraph, area);
     }
 
-    fn render_trade_header(&self, frame: &mut Frame, area: Rect, instruction_lines: &[String]) {
+    fn render_trade_header(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        instruction_lines: &[String],
+        balance_lines: &[String],
+    ) {
         let inst = self
             .trade
             .selected_inst(&self.inst_ids)
@@ -1229,6 +1273,7 @@ impl TuiApp {
             ),
         ])];
         let mut lines = lines;
+        lines.extend(balance_lines.iter().map(|line| Line::from(line.as_str())));
         lines.extend(
             instruction_lines
                 .iter()
