@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::Result as AnyResult;
-use chrono::{Local, TimeZone};
+use chrono::{DateTime, Local, LocalResult, TimeZone};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -19,9 +19,9 @@ use tokio::sync::{broadcast, mpsc};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::{
-    AccountBalance, AccountSnapshot, CancelOrderRequest, Command, PendingOrderInfo, PositionInfo,
-    PricePoint, SetLeverageRequest, TradeEvent, TradeOperator, TradeOrderKind, TradeRequest,
-    TradeSide, TradingCommand,
+    AccountBalance, AccountSnapshot, AiInsightRecord, CancelOrderRequest, Command,
+    PendingOrderInfo, PositionInfo, PricePoint, SetLeverageRequest, TradeEvent, TradeOperator,
+    TradeOrderKind, TradeRequest, TradeSide, TradingCommand,
 };
 use crate::okx::MarketInfo;
 use crate::trade_log::{TradeLogEntry, TradeLogStore};
@@ -40,6 +40,7 @@ const EMPTY_SERIES: &[(f64, f64)] = &[];
 const MAX_TRADE_LOGS: usize = 1000;
 const MAX_POSITION_RECORDS: usize = 100;
 const MAX_ORDER_RECORDS: usize = 100;
+const MAX_AI_INSIGHTS: usize = 64;
 const LEVERAGE_EPSILON: f64 = 1e-6;
 
 #[derive(Clone, Debug)]
@@ -57,6 +58,54 @@ struct PricePanelEntry {
     color: Color,
     price: f64,
     change_pct: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct AiDecisionRecord {
+    timestamp: DateTime<Local>,
+    system_prompt: String,
+    user_prompt: String,
+    response: String,
+}
+
+impl AiDecisionRecord {
+    fn from_payload(payload: AiInsightRecord) -> Self {
+        let timestamp = match Local.timestamp_millis_opt(payload.timestamp_ms) {
+            LocalResult::Single(dt) => dt,
+            _ => Local::now(),
+        };
+        AiDecisionRecord {
+            timestamp,
+            system_prompt: payload.system_prompt,
+            user_prompt: payload.user_prompt,
+            response: payload.response,
+        }
+    }
+
+    fn summary(&self) -> String {
+        let mut fragments = self
+            .response
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+            .take(2)
+            .collect::<Vec<_>>();
+        if fragments.is_empty() {
+            fragments.push(self.response.trim().to_string());
+        }
+        fragments.retain(|s| !s.is_empty());
+        if fragments.is_empty() {
+            "无内容".to_string()
+        } else {
+            fragments.join(" | ")
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +127,7 @@ enum TradeFocus {
     Positions,
     Orders,
     Logs,
+    AiInsights,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,19 +162,27 @@ struct TradeState {
     selected_position_idx: usize,
     selected_order_idx: usize,
     selected_log_idx: usize,
+    selected_ai_idx: usize,
     input: Option<OrderInputState>,
     order_tx: Option<mpsc::Sender<TradingCommand>>,
     logs: Vec<TradeLogEntry>,
+    ai_insights: Vec<AiDecisionRecord>,
     log_view_height: u16,
     position_view_height: u16,
     order_view_height: u16,
+    ai_view_height: u16,
     positions: Vec<PositionInfo>,
     open_orders: Vec<PendingOrderInfo>,
     focus: TradeFocus,
     log_store: Option<TradeLogStore>,
     log_detail: Option<TradeLogEntry>,
+    ai_detail: Option<AiDecisionRecord>,
+    ai_detail_scroll: u16,
+    ai_detail_view_height: u16,
+    ai_detail_total_rows: usize,
     markets: HashMap<String, MarketInfo>,
     balance: AccountBalance,
+    ai_enabled: bool,
 }
 
 impl TradeState {
@@ -132,25 +190,34 @@ impl TradeState {
         order_tx: Option<mpsc::Sender<TradingCommand>>,
         log_store: Option<TradeLogStore>,
         markets: HashMap<String, MarketInfo>,
+        ai_enabled: bool,
     ) -> Self {
         TradeState {
             selected_inst_idx: 0,
             selected_position_idx: 0,
             selected_order_idx: 0,
             selected_log_idx: 0,
+            selected_ai_idx: 0,
             input: None,
             order_tx,
             logs: Vec::new(),
+            ai_insights: Vec::new(),
             log_view_height: 0,
             position_view_height: 0,
             order_view_height: 0,
+            ai_view_height: 0,
             positions: Vec::new(),
             open_orders: Vec::new(),
             focus: TradeFocus::Instruments,
             log_store,
             log_detail: None,
+            ai_detail: None,
+            ai_detail_scroll: 0,
+            ai_detail_view_height: 0,
+            ai_detail_total_rows: 0,
             markets,
             balance: AccountBalance::default(),
+            ai_enabled,
         }
     }
 
@@ -162,6 +229,7 @@ impl TradeState {
         }
         self.ensure_position_selection();
         self.ensure_order_selection();
+        self.ensure_ai_selection();
     }
 
     fn ensure_position_selection(&mut self) {
@@ -190,12 +258,21 @@ impl TradeState {
         }
     }
 
+    fn ensure_ai_selection(&mut self) {
+        if self.ai_insights.is_empty() {
+            self.selected_ai_idx = 0;
+        } else if self.selected_ai_idx >= self.ai_insights.len() {
+            self.selected_ai_idx = self.ai_insights.len().saturating_sub(1);
+        }
+    }
+
     fn move_focus(&mut self, inst_ids: &[String], delta: isize) {
         match self.focus {
             TradeFocus::Instruments => self.move_instruments(inst_ids, delta),
             TradeFocus::Positions => self.move_positions(delta),
             TradeFocus::Orders => self.move_orders(delta),
             TradeFocus::Logs => self.move_logs(delta),
+            TradeFocus::AiInsights => self.move_ai(delta),
         }
     }
 
@@ -249,6 +326,22 @@ impl TradeState {
         self.selected_order_idx = next as usize;
     }
 
+    fn move_ai(&mut self, delta: isize) {
+        if self.ai_insights.is_empty() {
+            self.selected_ai_idx = 0;
+            return;
+        }
+        let len = self.ai_insights.len() as isize;
+        let current = self.selected_ai_idx.min((len - 1) as usize) as isize;
+        let mut next = current + delta;
+        if next < 0 {
+            next = 0;
+        } else if next >= len {
+            next = len - 1;
+        }
+        self.selected_ai_idx = next as usize;
+    }
+
     fn selected_inst<'a>(&self, inst_ids: &'a [String]) -> Option<&'a str> {
         inst_ids
             .get(self.selected_inst_idx)
@@ -292,6 +385,154 @@ impl TradeState {
             self.selected_log_idx = self.logs.len().saturating_sub(1);
         } else {
             self.ensure_log_selection();
+        }
+    }
+
+    fn push_ai_insight(&mut self, payload: AiInsightRecord) {
+        if !self.ai_enabled {
+            return;
+        }
+        let entry = AiDecisionRecord::from_payload(payload);
+        self.ai_insights.push(entry);
+        if self.ai_insights.len() > MAX_AI_INSIGHTS {
+            let overflow = self.ai_insights.len() - MAX_AI_INSIGHTS;
+            self.ai_insights.drain(0..overflow);
+            self.selected_ai_idx = self.selected_ai_idx.saturating_sub(overflow);
+        }
+        self.ensure_ai_selection();
+        self.selected_ai_idx = self.ai_insights.len().saturating_sub(1);
+    }
+
+    fn ai_panel_enabled(&self) -> bool {
+        self.ai_enabled
+    }
+
+    fn ai_detail_active(&self) -> bool {
+        self.ai_detail.is_some()
+    }
+
+    fn reset_ai_detail_scroll(&mut self) {
+        self.ai_detail_scroll = 0;
+        self.ai_detail_view_height = 0;
+        self.ai_detail_total_rows = 0;
+    }
+
+    fn update_ai_detail_view(&mut self, view_height: u16, total_rows: usize) {
+        let view_height = view_height.max(1);
+        self.ai_detail_view_height = view_height;
+        self.ai_detail_total_rows = total_rows;
+        self.clamp_ai_detail_scroll();
+    }
+
+    fn clamp_ai_detail_scroll(&mut self) {
+        let max_scroll = self.ai_detail_max_scroll();
+        if (self.ai_detail_scroll as usize) > max_scroll {
+            self.ai_detail_scroll = max_scroll as u16;
+        }
+    }
+
+    fn ai_detail_max_scroll(&self) -> usize {
+        if self.ai_detail_total_rows == 0 {
+            0
+        } else {
+            let view = self.ai_detail_view_height.max(1) as usize;
+            self.ai_detail_total_rows.saturating_sub(view)
+        }
+    }
+
+    fn scroll_ai_detail(&mut self, delta: i16) {
+        if self.ai_detail.is_none() || delta == 0 {
+            return;
+        }
+        let max_scroll = self.ai_detail_max_scroll() as i32;
+        let mut next = self.ai_detail_scroll as i32 + delta as i32;
+        if next < 0 {
+            next = 0;
+        } else if next > max_scroll {
+            next = max_scroll;
+        }
+        self.ai_detail_scroll = next as u16;
+    }
+
+    fn ai_insight_count(&self) -> usize {
+        self.ai_insights.len()
+    }
+
+    fn selected_ai_idx(&self) -> usize {
+        if self.ai_insights.is_empty() {
+            0
+        } else {
+            self.selected_ai_idx
+                .min(self.ai_insights.len().saturating_sub(1))
+        }
+    }
+
+    fn selected_ai_entry(&self) -> Option<&AiDecisionRecord> {
+        if self.ai_insights.is_empty() {
+            None
+        } else {
+            let idx = self.selected_ai_idx();
+            self.ai_insights.get(idx)
+        }
+    }
+
+    fn latest_ai_entry(&self) -> Option<&AiDecisionRecord> {
+        self.ai_insights.last()
+    }
+
+    fn latest_ai_summary(&self) -> Option<String> {
+        self.latest_ai_entry().map(|entry| entry.summary())
+    }
+
+    fn set_ai_view_height(&mut self, view_height: u16) {
+        self.ai_view_height = view_height.max(1);
+    }
+
+    fn page_scroll_ai(&mut self, pages: isize) {
+        if pages == 0 || self.ai_insights.is_empty() {
+            return;
+        }
+        let page = self.ai_view_height.max(1) as isize;
+        let len = self.ai_insights.len() as isize;
+        let mut next = self.selected_ai_idx() as isize + page * pages;
+        if next < 0 {
+            next = 0;
+        } else if next >= len {
+            next = len - 1;
+        }
+        self.selected_ai_idx = next as usize;
+    }
+
+    fn scroll_ai_to_start(&mut self) {
+        if !self.ai_insights.is_empty() {
+            self.selected_ai_idx = 0;
+        }
+    }
+
+    fn scroll_ai_to_end(&mut self) {
+        if !self.ai_insights.is_empty() {
+            self.selected_ai_idx = self.ai_insights.len().saturating_sub(1);
+        }
+    }
+
+    fn toggle_ai_detail(&mut self) {
+        if let Some(active) = &self.ai_detail {
+            if let Some(selected) = self.selected_ai_entry() {
+                if active == selected {
+                    self.ai_detail = None;
+                    self.reset_ai_detail_scroll();
+                    return;
+                }
+            } else {
+                self.ai_detail = None;
+                self.reset_ai_detail_scroll();
+                return;
+            }
+        }
+        if let Some(entry) = self.selected_ai_entry().cloned() {
+            self.ai_detail = Some(entry);
+            self.reset_ai_detail_scroll();
+            self.log_detail = None;
         }
     }
 
@@ -339,22 +580,39 @@ impl TradeState {
     }
 
     fn cycle_focus(&mut self, reverse: bool) {
-        self.focus = match (self.focus, reverse) {
-            (TradeFocus::Instruments, false) => TradeFocus::Positions,
-            (TradeFocus::Positions, false) => TradeFocus::Orders,
-            (TradeFocus::Orders, false) => TradeFocus::Logs,
-            (TradeFocus::Logs, false) => TradeFocus::Instruments,
-            (TradeFocus::Instruments, true) => TradeFocus::Logs,
-            (TradeFocus::Positions, true) => TradeFocus::Instruments,
-            (TradeFocus::Orders, true) => TradeFocus::Positions,
-            (TradeFocus::Logs, true) => TradeFocus::Orders,
+        let order = self.focus_order();
+        if order.is_empty() {
+            return;
+        }
+        let current_idx = order
+            .iter()
+            .position(|focus| *focus == self.focus)
+            .unwrap_or(0);
+        let len = order.len();
+        let next_idx = if reverse {
+            (current_idx + len - 1) % len
+        } else {
+            (current_idx + 1) % len
         };
+        self.focus = order[next_idx];
         match self.focus {
             TradeFocus::Instruments => {}
             TradeFocus::Positions => self.ensure_position_selection(),
             TradeFocus::Orders => self.ensure_order_selection(),
+            TradeFocus::AiInsights => self.ensure_ai_selection(),
             TradeFocus::Logs => {}
         }
+    }
+
+    fn focus_order(&self) -> Vec<TradeFocus> {
+        let order = vec![
+            TradeFocus::Instruments,
+            TradeFocus::Positions,
+            TradeFocus::Orders,
+            TradeFocus::AiInsights,
+            TradeFocus::Logs,
+        ];
+        order
     }
 
     fn focus_label(&self) -> &'static str {
@@ -363,6 +621,7 @@ impl TradeState {
             TradeFocus::Positions => "持仓",
             TradeFocus::Orders => "挂单",
             TradeFocus::Logs => "委托记录",
+            TradeFocus::AiInsights => "AI 决策",
         }
     }
 
@@ -596,6 +855,7 @@ impl TradeState {
         }
         if let Some(entry) = self.selected_log_entry().cloned() {
             self.log_detail = Some(entry);
+            self.ai_detail = None;
         }
     }
 }
@@ -673,6 +933,7 @@ impl TuiApp {
         retention: Duration,
         markets: HashMap<String, MarketInfo>,
         order_tx: Option<mpsc::Sender<TradingCommand>>,
+        ai_enabled: bool,
     ) -> TuiApp {
         let min_redraw_gap = Duration::from_millis(100);
         let inst_ids = if inst_ids.is_empty() {
@@ -705,7 +966,7 @@ impl TuiApp {
             y_zoom: 1.0,
             multi_axis: false,
             view_mode: ViewMode::Chart,
-            trade: TradeState::new(order_tx, Some(log_store), markets),
+            trade: TradeState::new(order_tx, Some(log_store), markets, ai_enabled),
             exit_confirmation: false,
         }
     }
@@ -780,8 +1041,13 @@ impl TuiApp {
                             terminal.draw(|frame| self.render(frame))?;
                             self.last_draw = Instant::now();
                         }
-                        Ok(Command::AiInsight(message)) => {
-                            self.status_message = Some(format!("Deepseek:\n{message}"));
+                        Ok(Command::AiInsight(record)) => {
+                            self.trade.push_ai_insight(record);
+                            let summary = self
+                                .trade
+                                .latest_ai_summary()
+                                .unwrap_or_else(|| "收到新的 AI 决策".to_string());
+                            self.status_message = Some(format!("Deepseek: {summary}"));
                             self.status_visible_until =
                                 Some(Instant::now() + Duration::from_secs(15));
                             self.status_is_error = false;
@@ -940,7 +1206,9 @@ impl TuiApp {
         if let Some(input) = &self.trade.input {
             self.render_order_dialog(frame, main_area, input);
         }
-        if let Some(detail) = &self.trade.log_detail {
+        if let Some(detail) = self.trade.ai_detail.clone() {
+            self.render_ai_detail(frame, main_area, &detail);
+        } else if let Some(detail) = &self.trade.log_detail {
             self.render_log_detail(frame, main_area, detail);
         }
     }
@@ -1300,16 +1568,31 @@ impl TuiApp {
         if self.trade.trading_enabled() {
             let (pos_cnt, ord_cnt) = self.trade.snapshot_counts();
             let log_cnt = self.trade.logs.len();
-            instruction_lines.push(format!(
-                "Tab 切换 · Shift+Tab 返回 · ↑↓/j k 浏览/滚动 · 持仓 {} · 挂单 {} · 委托 {} · t 返回图表",
+            let mut summary_line = format!(
+                "Tab 切换 · Shift+Tab 返回 · ↑↓/j k 浏览/滚动 · 持仓 {} · 挂单 {} · 委托 {}",
                 pos_cnt, ord_cnt, log_cnt
-            ));
+            );
+            if self.trade.ai_panel_enabled() {
+                summary_line.push_str(&format!(" · AI {}", self.trade.ai_insight_count()));
+            }
+            summary_line.push_str(" · t 返回图表");
+            instruction_lines.push(summary_line);
             if let Some(focus_hint) = self.focus_shortcut_hint() {
                 instruction_lines.push(focus_hint);
+            }
+            if self.trade.ai_panel_enabled() {
+                instruction_lines.push(
+                    "AI 决策：↑↓/j k 浏览 · PageUp/PageDown 翻页 · o 查看系统提示与用户输入"
+                        .to_string(),
+                );
             }
         } else {
             instruction_lines
                 .push("未配置 OKX API，仅显示行情 · Tab 切换 · ↑↓ 浏览 · t 返回图表".to_string());
+            if self.trade.ai_panel_enabled() {
+                instruction_lines
+                    .push("AI 决策：↑↓/j k 浏览 · o 查看系统提示与用户输入".to_string());
+            }
         }
         instruction_lines
     }
@@ -1328,6 +1611,9 @@ impl TuiApp {
             TradeFocus::Instruments => "焦点 合约：↑↓/j k 选择合约 · b 买入 · s 卖出",
             TradeFocus::Positions => "焦点 持仓：↑↓/j k 选择持仓 · p 止盈 · l 止损",
             TradeFocus::Orders => "焦点 挂单：↑↓/j k 选择挂单 · c 撤单 · r 改单",
+            TradeFocus::AiInsights => {
+                "焦点 AI 决策：↑↓/j k 浏览 · PageUp/PageDown 翻页 · Home/End 顶/底 · o 查看原始提示"
+            }
             TradeFocus::Logs => {
                 "焦点 委托记录：↑↓/j k 选择 · PageUp/PageDown 翻页 · Home/End 顶/底 · o 详情"
             }
@@ -1336,6 +1622,45 @@ impl TuiApp {
     }
 
     fn render_trade_activity(&mut self, frame: &mut Frame, area: Rect) {
+        let show_ai_panel = self.trade.ai_panel_enabled();
+        if !show_ai_panel {
+            self.render_trade_logs(frame, area);
+            return;
+        }
+        let min_logs_height: u16 = 4;
+        if area.height <= min_logs_height + 1 {
+            self.render_trade_logs(frame, area);
+            return;
+        }
+        let mut ai_height = area.height / 3;
+        if ai_height < 4 {
+            ai_height = 4;
+        }
+        if ai_height > 10 {
+            ai_height = 10;
+        }
+        let available_for_ai = area.height.saturating_sub(min_logs_height);
+        if available_for_ai < 3 {
+            self.render_trade_logs(frame, area);
+            return;
+        }
+        ai_height = ai_height.min(available_for_ai);
+        if ai_height < 3 {
+            self.render_trade_logs(frame, area);
+            return;
+        }
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(ai_height),
+                Constraint::Min(min_logs_height),
+            ])
+            .split(area);
+        self.render_ai_panel(frame, chunks[0]);
+        self.render_trade_logs(frame, chunks[1]);
+    }
+
+    fn render_trade_logs(&mut self, frame: &mut Frame, area: Rect) {
         let log_count = self.trade.logs.len();
         let mut lines = Vec::new();
         let inner_height = area.height.saturating_sub(2) as usize;
@@ -1389,6 +1714,57 @@ impl TuiApp {
         let page_height = list_visible.max(1);
         self.trade
             .set_log_view_height(page_height.min(u16::MAX as usize) as u16);
+        let paragraph = Paragraph::new(lines)
+            .alignment(Alignment::Left)
+            .block(block);
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_ai_panel(&mut self, frame: &mut Frame, area: Rect) {
+        let title = format!("AI 决策 {}", self.trade.ai_insight_count());
+        let mut block = Block::bordered().title(title);
+        if self.trade.focus == TradeFocus::AiInsights {
+            block = block.border_style(Style::default().fg(Color::LightMagenta));
+        }
+        if area.height < 3 {
+            frame.render_widget(block, area);
+            self.trade.set_ai_view_height(1);
+            return;
+        }
+        let mut lines = Vec::new();
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let list_visible = inner_height.saturating_sub(1);
+        let page_height = list_visible.max(1);
+        self.trade
+            .set_ai_view_height(page_height.min(u16::MAX as usize) as u16);
+        if list_visible == 0 {
+            lines.push(Line::from("窗口高度不足，无法显示 AI 决策"));
+        } else if !self.trade.ai_panel_enabled() {
+            lines.push(Line::from("未启用 Deepseek"));
+        } else if self.trade.ai_insight_count() == 0 {
+            lines.push(Line::from("等待 Deepseek 决策 · 按 o 查看原始提示"));
+        } else {
+            let summary_width = usize::from(area.width.saturating_sub(10).max(8));
+            lines.push(Line::from(format_columns(&[
+                ("时间", ColumnAlign::Left, 8),
+                ("摘要", ColumnAlign::Left, summary_width),
+            ])));
+            let len = self.trade.ai_insight_count();
+            let selected = self.trade.selected_ai_idx();
+            let (start, end) = visible_range(len, list_visible, selected);
+            for idx in start..end {
+                if let Some(entry) = self.trade.ai_insights.get(idx) {
+                    let time_label = entry.timestamp.format("%H:%M:%S").to_string();
+                    let summary = entry.summary();
+                    let row = format_columns(&[
+                        (time_label.as_str(), ColumnAlign::Left, 8),
+                        (summary.as_str(), ColumnAlign::Left, summary_width),
+                    ]);
+                    let highlight = self.trade.focus == TradeFocus::AiInsights && idx == selected;
+                    lines.push(Line::styled(row, row_style(highlight)));
+                }
+            }
+        }
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
             .block(block);
@@ -1820,6 +2196,67 @@ impl TuiApp {
         frame.render_widget(paragraph, popup);
     }
 
+    fn render_ai_detail(&mut self, frame: &mut Frame, area: Rect, entry: &AiDecisionRecord) {
+        if area.width < 36 || area.height < 10 {
+            return;
+        }
+        let popup_width = area.width.saturating_sub(8).min(90).max(44);
+        let popup_height = area.height.saturating_sub(6).min(24).max(12);
+        let left = area.x + (area.width.saturating_sub(popup_width)) / 2;
+        let top = area.y + (area.height.saturating_sub(popup_height)) / 2;
+        let popup = Rect::new(left, top, popup_width, popup_height);
+        let timestamp = entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut lines = vec![Line::from(format!("时间 {timestamp}"))];
+        lines.push(Line::from(Span::styled(
+            "[User Snapshot]",
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if entry.user_prompt.trim().is_empty() {
+            lines.push(Line::from("--"));
+        } else {
+            for line in entry.user_prompt.lines() {
+                lines.push(Line::from(line));
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "[AI Response]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if entry.response.trim().is_empty() {
+            lines.push(Line::from("--"));
+        } else {
+            for line in entry.response.lines() {
+                lines.push(Line::from(line));
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from("按 o 关闭 · 原文仅供参考"));
+        let content_height = popup_height.saturating_sub(2);
+        let content_width = popup_width.saturating_sub(2).max(1);
+        let total_rows = Self::wrapped_line_count(&lines, content_width);
+        self.trade.update_ai_detail_view(content_height, total_rows);
+        let scroll = self
+            .trade
+            .ai_detail_scroll
+            .min(self.trade.ai_detail_max_scroll().min(u16::MAX as usize) as u16);
+        let paragraph = Paragraph::new(lines)
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
+            .block(
+                Block::bordered()
+                    .title("Deepseek 提示详情")
+                    .border_style(Style::default().fg(Color::LightMagenta)),
+            );
+        frame.render_widget(Clear, popup);
+        frame.render_widget(paragraph, popup);
+    }
+
     fn render_log_detail(&self, frame: &mut Frame, area: Rect, entry: &TradeLogEntry) {
         if area.width < 30 || area.height < 8 {
             return;
@@ -1945,6 +2382,27 @@ impl TuiApp {
             .wrap(Wrap { trim: true });
         frame.render_widget(Clear, popup);
         frame.render_widget(paragraph, popup);
+    }
+
+    fn wrapped_line_count(lines: &[Line], max_width: u16) -> usize {
+        if max_width == 0 {
+            return lines.len();
+        }
+        let width = max_width as usize;
+        lines
+            .iter()
+            .map(|line| {
+                let mut line_width = 0;
+                for span in line.spans.iter() {
+                    line_width += span.content.width();
+                }
+                if line_width == 0 {
+                    1
+                } else {
+                    (line_width + width - 1) / width
+                }
+            })
+            .sum()
     }
 
     fn order_field_span(&self, label: &str, value: &str, active: bool) -> Line<'static> {
@@ -2271,6 +2729,33 @@ impl TuiApp {
     }
 
     fn handle_trade_key(&mut self, key: KeyEvent) {
+        if self.trade.ai_detail_active() {
+            match key.code {
+                KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Esc => {
+                    self.trade.toggle_ai_detail();
+                    self.set_status_message("已关闭 AI 详情 (O)");
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.trade.scroll_ai_detail(1);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.trade.scroll_ai_detail(-1);
+                }
+                KeyCode::PageDown => {
+                    let step = self.trade.ai_detail_view_height.max(1) as i16;
+                    self.trade.scroll_ai_detail(step);
+                }
+                KeyCode::PageUp => {
+                    let step = self.trade.ai_detail_view_height.max(1) as i16;
+                    self.trade.scroll_ai_detail(-step);
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.set_status_message("AI 详情聚焦中，按 O 关闭");
+                }
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Tab => {
                 self.trade.cycle_focus(false);
@@ -2321,33 +2806,37 @@ impl TuiApp {
                     self.start_order_replace();
                 }
             }
-            KeyCode::Char('o') | KeyCode::Char('O') => {
-                if self.trade.focus == TradeFocus::Logs {
-                    self.trade.toggle_log_detail();
-                }
-            }
+            KeyCode::Char('o') | KeyCode::Char('O') => match self.trade.focus {
+                TradeFocus::Logs => self.trade.toggle_log_detail(),
+                TradeFocus::AiInsights => self.trade.toggle_ai_detail(),
+                _ => {}
+            },
             KeyCode::PageUp => match self.trade.focus {
                 TradeFocus::Positions => self.trade.page_scroll_positions(-1),
                 TradeFocus::Orders => self.trade.page_scroll_orders(-1),
                 TradeFocus::Logs => self.trade.page_scroll_logs(-1),
+                TradeFocus::AiInsights => self.trade.page_scroll_ai(-1),
                 TradeFocus::Instruments => {}
             },
             KeyCode::PageDown => match self.trade.focus {
                 TradeFocus::Positions => self.trade.page_scroll_positions(1),
                 TradeFocus::Orders => self.trade.page_scroll_orders(1),
                 TradeFocus::Logs => self.trade.page_scroll_logs(1),
+                TradeFocus::AiInsights => self.trade.page_scroll_ai(1),
                 TradeFocus::Instruments => {}
             },
             KeyCode::Home => match self.trade.focus {
                 TradeFocus::Positions => self.trade.scroll_positions_to_start(),
                 TradeFocus::Orders => self.trade.scroll_orders_to_start(),
                 TradeFocus::Logs => self.trade.scroll_logs_to_start(),
+                TradeFocus::AiInsights => self.trade.scroll_ai_to_start(),
                 TradeFocus::Instruments => {}
             },
             KeyCode::End => match self.trade.focus {
                 TradeFocus::Positions => self.trade.scroll_positions_to_end(),
                 TradeFocus::Orders => self.trade.scroll_orders_to_end(),
                 TradeFocus::Logs => self.trade.scroll_logs_to_end(),
+                TradeFocus::AiInsights => self.trade.scroll_ai_to_end(),
                 TradeFocus::Instruments => {}
             },
             _ => {}

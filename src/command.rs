@@ -4,11 +4,19 @@ use serde::{Deserialize, Serialize};
 pub enum Command {
     MarkPriceUpdate(String, f64, i64, usize),
     Notify(String, String),
-    AiInsight(String),
+    AiInsight(AiInsightRecord),
     Error(String),
     TradeResult(TradeEvent),
     AccountSnapshot(AccountSnapshot),
     Exit,
+}
+
+#[derive(Debug, Clone)]
+pub struct AiInsightRecord {
+    pub timestamp_ms: i64,
+    pub system_prompt: String,
+    pub user_prompt: String,
+    pub response: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

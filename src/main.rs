@@ -106,10 +106,11 @@ async fn main() -> Result<(), anyhow::Error> {
         });
     }
     if let (Some(cfg), Some(_)) = (deepseek_cfg.clone(), trading_cfg.clone()) {
+        let deepseek_inst_ids = param.inst_ids.clone();
         let deepseek_tx = tx.clone();
         task::spawn(async move {
             let state = SharedAccountState::global();
-            match DeepseekReporter::new(cfg, state, deepseek_tx.clone()) {
+            match DeepseekReporter::new(cfg, state, deepseek_tx.clone(), deepseek_inst_ids) {
                 Ok(reporter) => {
                     let exit_rx = deepseek_tx.subscribe();
                     if let Err(err) = reporter.run(exit_rx).await {
@@ -163,7 +164,13 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     });
 
-    let mut app = TuiApp::new(&param.inst_ids, history_window, markets.clone(), order_tx);
+    let mut app = TuiApp::new(
+        &param.inst_ids,
+        history_window,
+        markets.clone(),
+        order_tx,
+        deepseek_cfg.is_some(),
+    );
     app.preload_trade_logs();
     if !history_points.is_empty() {
         app.preload_history(&history_points);
