@@ -771,7 +771,7 @@ impl OkxBusinessWsClient {
                     }
                 }
                 Err(err) => {
-                    self.emit_error(format!("failed to connect okx private ws: {err}"));
+                    self.emit_error(format!("failed to connect okx business ws: {err}"));
                 }
             }
             sleep(backoff).await;
