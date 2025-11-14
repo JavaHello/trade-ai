@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::Result as AnyResult;
-use chrono::{DateTime, Local, LocalResult, TimeZone};
+use chrono::{Local, TimeZone};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::ai_log::{AiDecisionRecord, AiDecisionStore};
 use crate::command::{
     AccountBalance, AccountSnapshot, AiInsightRecord, CancelOrderRequest, Command,
     PendingOrderInfo, PositionInfo, PricePoint, SetLeverageRequest, TradeEvent, TradeOperator,
@@ -58,54 +59,6 @@ struct PricePanelEntry {
     color: Color,
     price: f64,
     change_pct: Option<f64>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct AiDecisionRecord {
-    timestamp: DateTime<Local>,
-    system_prompt: String,
-    user_prompt: String,
-    response: String,
-}
-
-impl AiDecisionRecord {
-    fn from_payload(payload: AiInsightRecord) -> Self {
-        let timestamp = match Local.timestamp_millis_opt(payload.timestamp_ms) {
-            LocalResult::Single(dt) => dt,
-            _ => Local::now(),
-        };
-        AiDecisionRecord {
-            timestamp,
-            system_prompt: payload.system_prompt,
-            user_prompt: payload.user_prompt,
-            response: payload.response,
-        }
-    }
-
-    fn summary(&self) -> String {
-        let mut fragments = self
-            .response
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            })
-            .take(2)
-            .collect::<Vec<_>>();
-        if fragments.is_empty() {
-            fragments.push(self.response.trim().to_string());
-        }
-        fragments.retain(|s| !s.is_empty());
-        if fragments.is_empty() {
-            "无内容".to_string()
-        } else {
-            fragments.join(" | ")
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,6 +128,7 @@ struct TradeState {
     open_orders: Vec<PendingOrderInfo>,
     focus: TradeFocus,
     log_store: Option<TradeLogStore>,
+    ai_store: Option<AiDecisionStore>,
     log_detail: Option<TradeLogEntry>,
     ai_detail: Option<AiDecisionRecord>,
     ai_detail_scroll: u16,
@@ -189,6 +143,7 @@ impl TradeState {
     fn new(
         order_tx: Option<mpsc::Sender<TradingCommand>>,
         log_store: Option<TradeLogStore>,
+        ai_store: Option<AiDecisionStore>,
         markets: HashMap<String, MarketInfo>,
         ai_enabled: bool,
     ) -> Self {
@@ -210,6 +165,7 @@ impl TradeState {
             open_orders: Vec::new(),
             focus: TradeFocus::Instruments,
             log_store,
+            ai_store,
             log_detail: None,
             ai_detail: None,
             ai_detail_scroll: 0,
@@ -369,6 +325,21 @@ impl TradeState {
         Ok(count)
     }
 
+    fn load_persisted_ai_insights(&mut self) -> AnyResult<usize> {
+        if !self.ai_enabled {
+            return Ok(0);
+        }
+        let Some(store) = &self.ai_store else {
+            return Ok(0);
+        };
+        let entries = store.load()?;
+        let count = entries.len();
+        for entry in entries {
+            self.push_ai_entry(entry);
+        }
+        Ok(count)
+    }
+
     fn push_log(&mut self, entry: TradeLogEntry) {
         let was_empty = self.logs.is_empty();
         self.logs.push(entry);
@@ -388,11 +359,7 @@ impl TradeState {
         }
     }
 
-    fn push_ai_insight(&mut self, payload: AiInsightRecord) {
-        if !self.ai_enabled {
-            return;
-        }
-        let entry = AiDecisionRecord::from_payload(payload);
+    fn push_ai_entry(&mut self, entry: AiDecisionRecord) {
         self.ai_insights.push(entry);
         if self.ai_insights.len() > MAX_AI_INSIGHTS {
             let overflow = self.ai_insights.len() - MAX_AI_INSIGHTS;
@@ -401,6 +368,18 @@ impl TradeState {
         }
         self.ensure_ai_selection();
         self.selected_ai_idx = self.ai_insights.len().saturating_sub(1);
+    }
+
+    fn push_ai_insight(&mut self, payload: AiInsightRecord) -> AnyResult<()> {
+        if !self.ai_enabled {
+            return Ok(());
+        }
+        let entry = AiDecisionRecord::from_payload(payload);
+        self.push_ai_entry(entry.clone());
+        if let Some(store) = &self.ai_store {
+            store.append(&entry)?;
+        }
+        Ok(())
     }
 
     fn ai_panel_enabled(&self) -> bool {
@@ -948,6 +927,11 @@ impl TuiApp {
             colors.insert(inst_id.clone(), COLOR_PALETTE[idx % COLOR_PALETTE.len()]);
         }
         let log_store = TradeLogStore::new(TradeLogStore::default_path());
+        let ai_store = if ai_enabled {
+            Some(AiDecisionStore::new(AiDecisionStore::default_path()))
+        } else {
+            None
+        };
         TuiApp {
             inst_ids,
             colors,
@@ -966,7 +950,7 @@ impl TuiApp {
             y_zoom: 1.0,
             multi_axis: false,
             view_mode: ViewMode::Chart,
-            trade: TradeState::new(order_tx, Some(log_store), markets, ai_enabled),
+            trade: TradeState::new(order_tx, Some(log_store), ai_store, markets, ai_enabled),
             exit_confirmation: false,
         }
     }
@@ -1014,6 +998,12 @@ impl TuiApp {
         }
     }
 
+    pub fn preload_ai_insights(&mut self) {
+        if let Err(err) = self.trade.load_persisted_ai_insights() {
+            self.set_error_status_message(format!("加载历史 AI 决策失败: {err}"));
+        }
+    }
+
     pub async fn run(&mut self, rx: &mut broadcast::Receiver<Command>) -> Result<()> {
         color_eyre::install()?;
         let mut terminal = ratatui::init();
@@ -1042,15 +1032,20 @@ impl TuiApp {
                             self.last_draw = Instant::now();
                         }
                         Ok(Command::AiInsight(record)) => {
-                            self.trade.push_ai_insight(record);
-                            let summary = self
-                                .trade
-                                .latest_ai_summary()
-                                .unwrap_or_else(|| "收到新的 AI 决策".to_string());
-                            self.status_message = Some(format!("Deepseek: {summary}"));
-                            self.status_visible_until =
-                                Some(Instant::now() + Duration::from_secs(15));
-                            self.status_is_error = false;
+                            if let Err(err) = self.trade.push_ai_insight(record) {
+                                self.set_error_status_message(format!(
+                                    "记录 AI 决策失败: {err}"
+                                ));
+                            } else {
+                                let summary = self
+                                    .trade
+                                    .latest_ai_summary()
+                                    .unwrap_or_else(|| "收到新的 AI 决策".to_string());
+                                self.status_message = Some(format!("Deepseek: {summary}"));
+                                self.status_visible_until =
+                                    Some(Instant::now() + Duration::from_secs(15));
+                                self.status_is_error = false;
+                            }
                             terminal.draw(|frame| self.render(frame))?;
                             self.last_draw = Instant::now();
                         }

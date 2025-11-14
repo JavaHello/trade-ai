@@ -71,7 +71,7 @@ const SYSTEM_PROMPT: &str = r#"
 
 - **禁止对冲**：不能同时持有同一资产的多头和空头仓位
 
-- **禁止部分平仓**：必须一次性平​​掉所有仓位
+- **禁止部分平仓**：必须一次性平掉所有仓位
 
 ---
 
@@ -635,9 +635,6 @@ fn build_snapshot_prompt(snapshot: &AccountSnapshot, analytics: &[InstrumentAnal
 
     append_market_analytics(&mut buffer, analytics);
 
-    buffer.push_str(
-        "\n请总结 2-3 条中文要点，覆盖杠杆与爆仓风险、浮盈/浮亏趋势、挂单是否需要调整或取消，并指出资金占用与潜在机会。",
-    );
     buffer
 }
 

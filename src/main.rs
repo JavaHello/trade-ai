@@ -1,3 +1,4 @@
+mod ai_log;
 mod command;
 mod config;
 mod deepseek;
@@ -172,6 +173,7 @@ async fn main() -> Result<(), anyhow::Error> {
         deepseek_cfg.is_some(),
     );
     app.preload_trade_logs();
+    app.preload_ai_insights();
     if !history_points.is_empty() {
         app.preload_history(&history_points);
     }
