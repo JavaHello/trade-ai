@@ -1743,8 +1743,18 @@ pub async fn fetch_account_snapshot(
     let mut open_orders = fetch_open_orders(&client, config, &unique_inst_ids).await?;
     let mut algo_orders = fetch_open_algo_orders(&client, config, &unique_inst_ids).await?;
     open_orders.append(&mut algo_orders);
-    open_orders.sort_by(|a, b| a.inst_id.cmp(&b.inst_id));
-    positions.sort_by(|a, b| a.inst_id.cmp(&b.inst_id));
+    open_orders.sort_by(|a, b| {
+        b.create_time
+            .cmp(&a.create_time)
+            .then_with(|| a.inst_id.cmp(&b.inst_id))
+            .then_with(|| a.ord_id.cmp(&b.ord_id))
+    });
+    positions.sort_by(|a, b| {
+        b.create_time
+            .cmp(&a.create_time)
+            .then_with(|| a.inst_id.cmp(&b.inst_id))
+            .then_with(|| a.pos_side.cmp(&b.pos_side))
+    });
     let balance = fetch_account_balances(&client, config).await?;
     Ok(AccountSnapshot {
         positions,
@@ -1783,6 +1793,7 @@ async fn fetch_positions(
         let upl = parse_optional_float(entry.upl.clone());
         let upl_ratio = parse_optional_float(entry.upl_ratio.clone());
         let imr = parse_optional_float(entry.imr.clone()).unwrap_or(0.0);
+        let create_time = parse_optional_i64(entry.c_time.clone());
 
         positions.push(PositionInfo {
             inst_id: entry.inst_id,
@@ -1793,6 +1804,7 @@ async fn fetch_positions(
             upl,
             upl_ratio,
             imr,
+            create_time,
         });
     }
     Ok(positions)
@@ -1823,6 +1835,7 @@ async fn fetch_open_orders(
             let size = entry.sz.parse::<f64>().unwrap_or(0.0);
             let price = parse_optional_float(entry.px);
             let lever = parse_optional_float(entry.lever.clone());
+            let create_time = parse_optional_i64(entry.c_time.clone());
             open_orders.push(PendingOrderInfo {
                 inst_id: entry.inst_id,
                 ord_id: entry.ord_id,
@@ -1836,6 +1849,7 @@ async fn fetch_open_orders(
                 lever,
                 trigger_price: None,
                 kind: TradeOrderKind::Regular,
+                create_time,
             });
         }
     }
@@ -1900,6 +1914,7 @@ async fn build_pending_order_from_algo(entry: OkxPendingAlgoOrderEntry) -> Pendi
         entry.tp_trigger_px.as_deref(),
         entry.sl_trigger_px.as_deref(),
     );
+    let create_time = parse_optional_i64(entry.c_time.clone());
     PendingOrderInfo {
         inst_id: entry.inst_id,
         ord_id: entry.algo_id,
@@ -1913,6 +1928,7 @@ async fn build_pending_order_from_algo(entry: OkxPendingAlgoOrderEntry) -> Pendi
         lever,
         trigger_price,
         kind,
+        create_time,
     }
 }
 
@@ -1966,6 +1982,15 @@ fn parse_bool_flag(value: &Option<serde_json::Value>) -> bool {
     }
 }
 
+fn parse_i64_str(value: &str) -> Option<i64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        trimmed.parse::<i64>().ok()
+    }
+}
+
 fn aggregate_balance_details<'a, I>(details: I) -> Vec<AccountBalanceDelta>
 where
     I: Iterator<Item = &'a BalanceDetail>,
@@ -2008,7 +2033,7 @@ fn accumulate_balance(target: &mut Option<f64>, value: Option<f64>) {
 }
 
 fn parse_optional_i64(value: Option<String>) -> Option<i64> {
-    value?.trim().parse::<i64>().ok()
+    value.as_deref().and_then(parse_i64_str)
 }
 
 fn parse_okx_trade_side(value: &str) -> Option<TradeSide> {
@@ -2200,6 +2225,8 @@ struct OkxPositionEntry {
     upl_ratio: Option<String>,
     #[serde(default)]
     imr: Option<String>,
+    #[serde(rename = "cTime", default)]
+    c_time: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2228,6 +2255,8 @@ struct OkxPendingOrderEntry {
     tag: Option<String>,
     #[serde(default)]
     lever: Option<String>,
+    #[serde(rename = "cTime", default)]
+    c_time: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2266,6 +2295,8 @@ struct OkxPendingAlgoOrderEntry {
     sl_trigger_px: Option<String>,
     #[serde(default)]
     sl_ord_px: Option<String>,
+    #[serde(rename = "cTime", default)]
+    c_time: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2371,6 +2402,8 @@ struct WsPositionEntry {
     upl_ratio: Option<String>,
     #[serde(default)]
     imr: Option<String>,
+    #[serde(rename = "cTime", default)]
+    c_time: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2411,6 +2444,8 @@ struct WsOrderEntry {
     trade_id: Option<String>,
     #[serde(default)]
     exec_type: Option<String>,
+    #[serde(rename = "cTime", default)]
+    c_time: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2450,6 +2485,8 @@ struct WsAlgoOrderEntry {
     sl_trigger_px: Option<String>,
     #[serde(default)]
     sl_ord_px: Option<String>,
+    #[serde(rename = "cTime", default)]
+    c_time: Option<String>,
 }
 
 static GLOBAL_ACCOUNT_STATE: Lazy<Mutex<AccountState>> =
@@ -2607,6 +2644,7 @@ impl AccountState {
             let upl = parse_optional_float(entry.upl.clone());
             let upl_ratio = parse_optional_float(entry.upl_ratio.clone());
             let imr = parse_optional_float(entry.imr.clone()).unwrap_or(0.0);
+            let create_time = parse_optional_i64(entry.c_time.clone());
             let key = PositionKey {
                 inst_id: entry.inst_id.clone(),
                 pos_side: entry.pos_side.clone(),
@@ -2618,29 +2656,31 @@ impl AccountState {
                 continue;
             }
             let entry_changed = match self.positions.get(&key) {
-                Some(existing) => {
-                    existing.size != size
-                        || existing.avg_px != avg_px
-                        || existing.lever != lever
-                        || existing.upl != upl
-                        || existing.upl_ratio != upl_ratio
-                }
-                None => true,
-            };
-            if entry_changed {
-                self.positions.insert(
+                    Some(existing) => {
+                        existing.size != size
+                            || existing.avg_px != avg_px
+                            || existing.lever != lever
+                            || existing.upl != upl
+                            || existing.upl_ratio != upl_ratio
+                            || existing.create_time != create_time
+                    }
+                    None => true,
+                };
+                if entry_changed {
+                    self.positions.insert(
                     key,
                     PositionInfo {
                         inst_id: entry.inst_id.clone(),
                         pos_side: entry.pos_side.clone(),
                         size,
                         avg_px,
-                        lever,
-                        upl,
-                        upl_ratio,
-                        imr,
-                    },
-                );
+                            lever,
+                            upl,
+                            upl_ratio,
+                            imr,
+                            create_time,
+                        },
+                    );
                 changed = true;
             }
         }
@@ -2658,6 +2698,7 @@ impl AccountState {
                 let price = parse_optional_float(entry.px.clone());
                 let reduce_only = parse_bool_flag(&entry.reduce_only);
                 let lever = parse_optional_float(entry.lever.clone());
+                let create_time = parse_optional_i64(entry.c_time.clone());
                 let entry_changed = match self.open_orders.get(&entry.ord_id) {
                     Some(existing) => {
                         existing.size != size
@@ -2665,6 +2706,7 @@ impl AccountState {
                             || existing.state != entry.state
                             || existing.reduce_only != reduce_only
                             || existing.lever != lever
+                            || existing.create_time != create_time
                     }
                     None => true,
                 };
@@ -2684,6 +2726,7 @@ impl AccountState {
                             lever,
                             trigger_price: None,
                             kind: TradeOrderKind::Regular,
+                            create_time,
                         },
                     );
                     changed = true;
@@ -2723,6 +2766,7 @@ impl AccountState {
                     entry.tp_trigger_px.as_deref(),
                     entry.sl_trigger_px.as_deref(),
                 );
+                let create_time = parse_optional_i64(entry.c_time.clone());
                 let entry_changed = match self.open_orders.get(&entry.algo_id) {
                     Some(existing) => {
                         existing.size != size
@@ -2732,6 +2776,7 @@ impl AccountState {
                             || existing.reduce_only != reduce_only
                             || existing.lever != lever
                             || existing.kind != kind
+                            || existing.create_time != create_time
                     }
                     None => true,
                 };
@@ -2751,6 +2796,7 @@ impl AccountState {
                             lever,
                             trigger_price,
                             kind,
+                            create_time,
                         },
                     );
                     changed = true;
@@ -2779,14 +2825,16 @@ impl AccountState {
     fn snapshot(&self) -> AccountSnapshot {
         let mut positions: Vec<_> = self.positions.values().cloned().collect();
         positions.sort_by(|a, b| {
-            a.inst_id
-                .cmp(&b.inst_id)
+            b.create_time
+                .cmp(&a.create_time)
+                .then_with(|| a.inst_id.cmp(&b.inst_id))
                 .then_with(|| a.pos_side.cmp(&b.pos_side))
         });
         let mut open_orders: Vec<_> = self.open_orders.values().cloned().collect();
         open_orders.sort_by(|a, b| {
-            a.inst_id
-                .cmp(&b.inst_id)
+            b.create_time
+                .cmp(&a.create_time)
+                .then_with(|| a.inst_id.cmp(&b.inst_id))
                 .then_with(|| a.ord_id.cmp(&b.ord_id))
         });
         AccountSnapshot {

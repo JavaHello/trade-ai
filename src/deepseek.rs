@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use chrono::Local;
+use chrono::{Local, TimeZone};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -760,6 +760,9 @@ fn format_position(position: &PositionInfo) -> String {
     if let Some(value) = gear {
         segments.push(format!("杠杆 {}", value));
     }
+    if let Some(timestamp) = format_timestamp_label(position.create_time) {
+        segments.push(format!("建仓 {}", timestamp));
+    }
     segments.push(format!("保证金 {}", format_float(position.imr)));
     segments.join(" · ")
 }
@@ -794,6 +797,9 @@ fn format_order(order: &PendingOrderInfo) -> String {
     if order.reduce_only {
         segments.push("只减仓".to_string());
     }
+    if let Some(timestamp) = format_timestamp_label(order.create_time) {
+        segments.push(format!("创建 {}", timestamp));
+    }
     segments.join(" · ")
 }
 
@@ -810,6 +816,12 @@ fn format_balance(balance: &AccountBalanceDelta) -> String {
         segments.push(format!("现金 {}", format_float(cash)));
     }
     segments.join(" · ")
+}
+
+fn format_timestamp_label(timestamp: Option<i64>) -> Option<String> {
+    timestamp
+        .and_then(|ts| Local.timestamp_millis_opt(ts).single())
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
 fn format_float(value: f64) -> String {

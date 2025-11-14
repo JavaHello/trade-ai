@@ -1323,6 +1323,7 @@ impl TuiApp {
         } else {
             lines.push(Line::from(format_columns(&[
                 ("序号", ColumnAlign::Right, 4),
+                ("建仓", ColumnAlign::Left, 10),
                 ("合约", ColumnAlign::Left, 14),
                 ("方向", ColumnAlign::Left, 4),
                 ("数量", ColumnAlign::Right, 12),
@@ -1367,8 +1368,10 @@ impl TuiApp {
                     .map(Self::format_pnl_ratio)
                     .unwrap_or_else(|| "--".to_string());
                 let ordinal_label = format!("{}", idx + 1);
+                let time_label = Self::snapshot_time_label(position.create_time);
                 let row = format_columns(&[
                     (ordinal_label.as_str(), ColumnAlign::Right, 4),
+                    (time_label.as_str(), ColumnAlign::Left, 10),
                     (position.inst_id.as_str(), ColumnAlign::Left, 14),
                     (side_label, ColumnAlign::Left, 4),
                     (size_label.as_str(), ColumnAlign::Right, 12),
@@ -1443,6 +1446,7 @@ impl TuiApp {
         } else {
             lines.push(Line::from(format_columns(&[
                 ("序号", ColumnAlign::Right, 4),
+                ("创建", ColumnAlign::Left, 10),
                 ("合约", ColumnAlign::Left, 14),
                 ("方向", ColumnAlign::Left, 10),
                 ("类型", ColumnAlign::Left, 10),
@@ -1484,8 +1488,10 @@ impl TuiApp {
                 let ord_label = Self::short_order_id(&order.ord_id);
                 let lever_label = Self::leverage_label(order.lever);
                 let ordinal_label = format!("{}", idx + 1);
+                let time_label = Self::snapshot_time_label(order.create_time);
                 let row = format_columns(&[
                     (ordinal_label.as_str(), ColumnAlign::Right, 4),
+                    (time_label.as_str(), ColumnAlign::Left, 10),
                     (order.inst_id.as_str(), ColumnAlign::Left, 14),
                     (side_label.as_str(), ColumnAlign::Left, 10),
                     (intent_label, ColumnAlign::Left, 10),
@@ -3605,6 +3611,13 @@ impl TuiApp {
             }
         }
         Ok(false)
+    }
+
+    fn snapshot_time_label(timestamp: Option<i64>) -> String {
+        timestamp
+            .and_then(|ts| Local.timestamp_millis_opt(ts).single())
+            .map(|dt| dt.format("%H:%M:%S").to_string())
+            .unwrap_or_else(|| "--:--:--".to_string())
     }
 
     fn format_timestamp_label(ts_ms: f64) -> String {

@@ -229,6 +229,8 @@ pub struct PositionInfo {
     #[serde(default)]
     pub upl_ratio: Option<f64>,
     pub imr: f64,
+    #[serde(default)]
+    pub create_time: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,4 +249,6 @@ pub struct PendingOrderInfo {
     pub trigger_price: Option<f64>,
     #[serde(default)]
     pub kind: TradeOrderKind,
+    #[serde(default)]
+    pub create_time: Option<i64>,
 }
