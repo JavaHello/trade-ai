@@ -1997,6 +1997,11 @@ where
 {
     let mut map: HashMap<String, AccountBalanceDelta> = HashMap::new();
     for detail in details {
+        if let Some(avail_eq) = parse_optional_float(detail.avail_eq.clone()) {
+            if avail_eq <= 0.0 {
+                continue;
+            }
+        }
         let entry = map
             .entry(detail.ccy.clone())
             .or_insert(AccountBalanceDelta {
@@ -2656,31 +2661,31 @@ impl AccountState {
                 continue;
             }
             let entry_changed = match self.positions.get(&key) {
-                    Some(existing) => {
-                        existing.size != size
-                            || existing.avg_px != avg_px
-                            || existing.lever != lever
-                            || existing.upl != upl
-                            || existing.upl_ratio != upl_ratio
-                            || existing.create_time != create_time
-                    }
-                    None => true,
-                };
-                if entry_changed {
-                    self.positions.insert(
+                Some(existing) => {
+                    existing.size != size
+                        || existing.avg_px != avg_px
+                        || existing.lever != lever
+                        || existing.upl != upl
+                        || existing.upl_ratio != upl_ratio
+                        || existing.create_time != create_time
+                }
+                None => true,
+            };
+            if entry_changed {
+                self.positions.insert(
                     key,
                     PositionInfo {
                         inst_id: entry.inst_id.clone(),
                         pos_side: entry.pos_side.clone(),
                         size,
                         avg_px,
-                            lever,
-                            upl,
-                            upl_ratio,
-                            imr,
-                            create_time,
-                        },
-                    );
+                        lever,
+                        upl,
+                        upl_ratio,
+                        imr,
+                        create_time,
+                    },
+                );
                 changed = true;
             }
         }

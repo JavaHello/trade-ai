@@ -2,27 +2,25 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{Local, TimeZone};
+use chrono::{DateTime, Duration as ChronoDuration, Local, TimeZone};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::command::{
     AccountBalanceDelta, AccountSnapshot, AiInsightRecord, Command, PendingOrderInfo, PositionInfo,
+    TradeEvent, TradeOperator, TradeOrderKind, TradeRequest, TradeSide, TradingCommand,
 };
 use crate::config::DeepseekConfig;
 use crate::okx::SharedAccountState;
+use crate::trade_log::{TradeLogEntry, TradeLogStore};
 
 const SYSTEM_PROMPT: &str = r#"
 # 角色与身份
-
 您是一位自主运行的加密货币交易代理，在 Okx 交易所的实时市场中执行交易。
-
 您的代号：AI 交易模型 [Deepseek]。
-
 您的使命：通过系统化、纪律严明的交易，最大化风险调整后的收益（PnL）。
-
 ---
 
 # 交易环境规范
@@ -48,41 +46,24 @@ const SYSTEM_PROMPT: &str = r#"
 # 操作空间定义
 
 每个决策周期内，您有四种可能的操作：
-
 1. **买入入场**：建立新的多头头寸（押注价格上涨）
-
 - 适用情况：看涨技术形态、积极动能、风险回报比有利于上涨
-
 2. **卖出入场**：建立新的空头头寸（押注价格下跌）
-
 - 适用情况：看跌技术形态、消极动能、风险回报比有利于下跌
-
 3. **持有**：维持现有头寸不变
-
 - 适用情况：现有头寸表现符合预期，或不存在明显的优势
-
 4. **平仓**：完全退出现有头寸
-
 - 适用情况：达到盈利目标、触发止损或符合交易逻辑已失效
-
 ## 仓位管理限制
-
 - **禁止金字塔式加仓**：不能在现有仓位上加仓（每种币种最多只能持有一个仓位）
-
 - **禁止对冲**：不能同时持有同一资产的多头和空头仓位
-
 - **禁止部分平仓**：必须一次性平掉所有仓位
-
 ---
 
 # 仓位规模框架
-
 使用以下公式计算仓位规模：
-
 仓位规模（美元）= 可用资金 × 杠杆 × 分配百分比
-
 仓位规模（币种）= 仓位规模（美元）/ 当前价格
-
 ## 仓位规模注意事项
 
 1. **可用资金**：仅使用可用资金（而非账户余额）
@@ -126,7 +107,7 @@ const SYSTEM_PROMPT: &str = r#"
 ```json
 {
 "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close",
-"coin": "BTC" | "ETH" | "SOL" | "BNB" | "DOGE" | "XRP",
+"coin": "<string>",
 "quantity": <float>,
 "leverage": <integer 1-20>,
 "profit_target": <float>,
@@ -169,6 +150,7 @@ const VOLUME_AVG_PERIOD: usize = 20;
 const MAX_POSITIONS: usize = 12;
 const MAX_ORDERS: usize = 12;
 const MAX_BALANCES: usize = 12;
+const AI_OPERATOR_NAME: &str = "Deepseek";
 
 pub struct DeepseekReporter {
     client: DeepseekClient,
@@ -177,6 +159,8 @@ pub struct DeepseekReporter {
     interval: Duration,
     inst_ids: Vec<String>,
     market: MarketDataFetcher,
+    performance: PerformanceTracker,
+    order_tx: Option<mpsc::Sender<TradingCommand>>,
 }
 
 impl DeepseekReporter {
@@ -185,10 +169,13 @@ impl DeepseekReporter {
         state: SharedAccountState,
         tx: broadcast::Sender<Command>,
         inst_ids: Vec<String>,
+        start_timestamp_ms: i64,
+        order_tx: Option<mpsc::Sender<TradingCommand>>,
     ) -> Result<Self> {
         let client = DeepseekClient::new(&config)?;
         let market = MarketDataFetcher::new()?;
         let inst_ids = normalize_inst_ids(inst_ids);
+        let performance = PerformanceTracker::new(start_timestamp_ms);
         Ok(DeepseekReporter {
             client,
             state,
@@ -196,6 +183,8 @@ impl DeepseekReporter {
             interval: config.interval,
             inst_ids,
             market,
+            performance,
+            order_tx,
         })
     }
 
@@ -224,11 +213,31 @@ impl DeepseekReporter {
             return Ok(());
         }
         let analytics = self.collect_market_analytics().await;
-        let prompt = build_snapshot_prompt(&snapshot, &analytics);
+        let performance = match self.performance.summary(self.interval) {
+            Ok(summary) => {
+                if summary.overall.is_none() && summary.recent.is_none() {
+                    None
+                } else {
+                    Some(summary)
+                }
+            }
+            Err(err) => {
+                let _ = self
+                    .tx
+                    .send(Command::Error(format!("统计交易表现失败: {err}")));
+                None
+            }
+        };
+        let prompt = build_snapshot_prompt(&snapshot, &analytics, performance.as_ref());
         let insight = self.client.chat_completion(&prompt).await?;
         let trimmed = insight.trim();
         if trimmed.is_empty() {
             return Ok(());
+        }
+        if let Err(err) = self.execute_ai_decision(trimmed, &analytics).await {
+            let _ = self
+                .tx
+                .send(Command::Error(format!("执行 AI 决策失败: {err}")));
         }
         let record = AiInsightRecord {
             timestamp_ms: Local::now().timestamp_millis(),
@@ -258,6 +267,245 @@ impl DeepseekReporter {
         }
         analytics
     }
+
+    async fn execute_ai_decision(
+        &self,
+        response: &str,
+        analytics: &[InstrumentAnalytics],
+    ) -> Result<()> {
+        let Some(_) = &self.order_tx else {
+            return Ok(());
+        };
+        let decision = match parse_ai_decision(response) {
+            Ok(payload) => payload,
+            Err(err) => {
+                return Err(anyhow!("解析 AI 决策失败: {err}"));
+            }
+        };
+        match decision.signal {
+            DecisionSignal::Hold => Ok(()),
+            DecisionSignal::BuyToEnter | DecisionSignal::SellToEnter => {
+                self.place_entry_order(&decision, analytics).await
+            }
+            DecisionSignal::Close => self.execute_close_signal(&decision, analytics).await,
+        }
+    }
+
+    async fn place_entry_order(
+        &self,
+        decision: &AiDecisionPayload,
+        analytics: &[InstrumentAnalytics],
+    ) -> Result<()> {
+        let inst_id = self
+            .resolve_inst_id(&decision.coin)
+            .ok_or_else(|| anyhow!("无法匹配交易币种 {}", decision.coin))?;
+        if decision.quantity <= 0.0 {
+            return Err(anyhow!(
+                "{} 决策数量必须大于 0 (当前 {})",
+                inst_id,
+                decision.quantity
+            ));
+        }
+        let price = self
+            .price_for_inst(&inst_id, analytics)
+            .await
+            .with_context(|| format!("获取 {} 最新价格失败", inst_id))?;
+        let side = match decision.signal {
+            DecisionSignal::BuyToEnter => TradeSide::Buy,
+            DecisionSignal::SellToEnter => TradeSide::Sell,
+            _ => {
+                return Err(anyhow!("信号 {:?} 不支持创建新仓位", decision.signal));
+            }
+        };
+        let request = TradeRequest {
+            inst_id,
+            side,
+            price,
+            size: decision.quantity,
+            pos_side: None,
+            reduce_only: false,
+            tag: Some("deepseek-entry".to_string()),
+            operator: ai_operator(),
+            leverage: if decision.leverage > 0.0 {
+                Some(decision.leverage)
+            } else {
+                None
+            },
+            kind: TradeOrderKind::Regular,
+        };
+        self.submit_trade_request(request.clone()).await?;
+        self.place_protective_orders(&request, price, decision).await
+    }
+
+    async fn place_protective_orders(
+        &self,
+        entry: &TradeRequest,
+        entry_price: f64,
+        decision: &AiDecisionPayload,
+    ) -> Result<()> {
+        if decision.stop_loss <= 0.0 && decision.profit_target <= 0.0 {
+            return Ok(());
+        }
+        let closing_side = entry.side.opposite();
+        let pos_side = determine_entry_pos_side(&entry.inst_id, entry.side);
+        let leverage = entry.leverage;
+        if decision.stop_loss > 0.0 {
+            if is_valid_stop_loss(entry.side, entry_price, decision.stop_loss) {
+                let request = TradeRequest {
+                    inst_id: entry.inst_id.clone(),
+                    side: closing_side,
+                    price: decision.stop_loss,
+                    size: entry.size,
+                    pos_side: pos_side.clone(),
+                    reduce_only: true,
+                    tag: Some("deepseek-stop-loss".to_string()),
+                    operator: ai_operator(),
+                    leverage,
+                    kind: TradeOrderKind::StopLoss,
+                };
+                self.submit_trade_request(request).await?;
+            } else {
+                self.warn_invalid_protective_price(
+                    &entry.inst_id,
+                    "止损",
+                    decision.stop_loss,
+                    entry.side,
+                );
+            }
+        }
+        if decision.profit_target > 0.0 {
+            if is_valid_take_profit(entry.side, entry_price, decision.profit_target) {
+                let request = TradeRequest {
+                    inst_id: entry.inst_id.clone(),
+                    side: closing_side,
+                    price: decision.profit_target,
+                    size: entry.size,
+                    pos_side: pos_side.clone(),
+                    reduce_only: true,
+                    tag: Some("deepseek-take-profit".to_string()),
+                    operator: ai_operator(),
+                    leverage,
+                    kind: TradeOrderKind::TakeProfit,
+                };
+                self.submit_trade_request(request).await?;
+            } else {
+                self.warn_invalid_protective_price(
+                    &entry.inst_id,
+                    "止盈",
+                    decision.profit_target,
+                    entry.side,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn execute_close_signal(
+        &self,
+        decision: &AiDecisionPayload,
+        analytics: &[InstrumentAnalytics],
+    ) -> Result<()> {
+        let inst_id = self
+            .resolve_inst_id(&decision.coin)
+            .ok_or_else(|| anyhow!("无法匹配交易币种 {}", decision.coin))?;
+        let snapshot = self.state.snapshot().await;
+        let position = snapshot
+            .positions
+            .into_iter()
+            .find(|pos| pos.inst_id.eq_ignore_ascii_case(&inst_id))
+            .ok_or_else(|| anyhow!("{} 无持仓可平", inst_id))?;
+        let available = position.size.abs();
+        if available <= 0.0 {
+            return Err(anyhow!("{} 当前持仓数量无效", inst_id));
+        }
+        let mut size = if decision.quantity > 0.0 {
+            decision.quantity.min(available)
+        } else {
+            available
+        };
+        if size <= 0.0 {
+            size = available;
+        }
+        let price = self
+            .price_for_inst(&inst_id, analytics)
+            .await
+            .with_context(|| format!("获取 {} 最新价格失败", inst_id))?;
+        let (side, pos_side) = determine_close_side(&position);
+        let request = TradeRequest {
+            inst_id,
+            side,
+            price,
+            size,
+            pos_side,
+            reduce_only: true,
+            tag: Some("deepseek-close".to_string()),
+            operator: ai_operator(),
+            leverage: position.lever,
+            kind: TradeOrderKind::Regular,
+        };
+        self.submit_trade_request(request).await
+    }
+
+    async fn submit_trade_request(&self, request: TradeRequest) -> Result<()> {
+        let Some(order_tx) = &self.order_tx else {
+            return Ok(());
+        };
+        order_tx
+            .send(TradingCommand::Place(request))
+            .await
+            .map_err(|err| anyhow!("发送下单命令失败: {err}"))?;
+        Ok(())
+    }
+
+    fn warn_invalid_protective_price(
+        &self,
+        inst_id: &str,
+        label: &str,
+        price: f64,
+        side: TradeSide,
+    ) {
+        let expectation = match (label, side) {
+            ("止损", TradeSide::Buy) => "应低于入场价",
+            ("止损", TradeSide::Sell) => "应高于入场价",
+            ("止盈", TradeSide::Buy) => "应高于入场价",
+            ("止盈", TradeSide::Sell) => "应低于入场价",
+            _ => "价格方向不符",
+        };
+        let direction = match side {
+            TradeSide::Buy => "做多",
+            TradeSide::Sell => "做空",
+        };
+        let _ = self.tx.send(Command::Error(format!(
+            "Deepseek {inst_id} {label} 价格 {:.4} 与 {direction} 方向不符（{expectation}），已忽略",
+            price
+        )));
+    }
+
+    async fn price_for_inst(
+        &self,
+        inst_id: &str,
+        analytics: &[InstrumentAnalytics],
+    ) -> Result<f64> {
+        if let Some(price) = analytics
+            .iter()
+            .find(|entry| entry.inst_id.eq_ignore_ascii_case(inst_id))
+            .and_then(|entry| entry.current_price)
+        {
+            return Ok(price);
+        }
+        let entry = self.market.fetch_inst(inst_id).await?;
+        entry
+            .current_price
+            .ok_or_else(|| anyhow!("{} 缺少最新价格", inst_id))
+    }
+
+    fn resolve_inst_id(&self, coin: &str) -> Option<String> {
+        let coin = coin.trim().to_ascii_uppercase();
+        self.inst_ids
+            .iter()
+            .find(|inst| inst.to_ascii_uppercase().starts_with(&format!("{coin}-")))
+            .cloned()
+    }
 }
 
 fn has_material_data(snapshot: &AccountSnapshot) -> bool {
@@ -265,6 +513,118 @@ fn has_material_data(snapshot: &AccountSnapshot) -> bool {
         || !snapshot.open_orders.is_empty()
         || snapshot.balance.total_equity.is_some()
         || !snapshot.balance.delta.is_empty()
+}
+
+fn determine_close_side(position: &PositionInfo) -> (TradeSide, Option<String>) {
+    if let Some(pos_side) = position.pos_side.as_deref() {
+        if pos_side.eq_ignore_ascii_case("long") {
+            return (TradeSide::Sell, Some(pos_side.to_string()));
+        } else if pos_side.eq_ignore_ascii_case("short") {
+            return (TradeSide::Buy, Some(pos_side.to_string()));
+        }
+        let side = if position.size >= 0.0 {
+            TradeSide::Sell
+        } else {
+            TradeSide::Buy
+        };
+        return (side, Some(pos_side.to_string()));
+    }
+    let side = if position.size >= 0.0 {
+        TradeSide::Sell
+    } else {
+        TradeSide::Buy
+    };
+    (side, None)
+}
+
+fn determine_entry_pos_side(inst_id: &str, side: TradeSide) -> Option<String> {
+    let upper = inst_id.to_ascii_uppercase();
+    if upper.ends_with("-SWAP") || upper.ends_with("-FUTURES") {
+        return Some(match side {
+            TradeSide::Buy => "long",
+            TradeSide::Sell => "short",
+        }
+        .to_string());
+    }
+    None
+}
+
+fn is_valid_take_profit(side: TradeSide, entry_price: f64, target: f64) -> bool {
+    if entry_price <= 0.0 || target <= 0.0 {
+        return false;
+    }
+    match side {
+        TradeSide::Buy => target > entry_price,
+        TradeSide::Sell => target < entry_price,
+    }
+}
+
+fn is_valid_stop_loss(side: TradeSide, entry_price: f64, stop: f64) -> bool {
+    if entry_price <= 0.0 || stop <= 0.0 {
+        return false;
+    }
+    match side {
+        TradeSide::Buy => stop < entry_price,
+        TradeSide::Sell => stop > entry_price,
+    }
+}
+
+fn ai_operator() -> TradeOperator {
+    TradeOperator::Ai {
+        name: Some(AI_OPERATOR_NAME.to_string()),
+    }
+}
+
+fn parse_ai_decision(raw: &str) -> Result<AiDecisionPayload> {
+    match serde_json::from_str::<AiDecisionPayload>(raw) {
+        Ok(payload) => Ok(payload),
+        Err(_) => {
+            let start = raw.find('{').ok_or_else(|| anyhow!("缺少 JSON 起始"))?;
+            let end = raw.rfind('}').ok_or_else(|| anyhow!("缺少 JSON 结束"))?;
+            let slice = raw
+                .get(start..=end)
+                .ok_or_else(|| anyhow!("无法截取 AI JSON"))?;
+            serde_json::from_str::<AiDecisionPayload>(slice)
+                .map_err(|err| anyhow!("解析 JSON 失败: {err}"))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AiDecisionPayload {
+    signal: DecisionSignal,
+    coin: String,
+    #[serde(default)]
+    quantity: f64,
+    #[serde(default)]
+    leverage: f64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    profit_target: f64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    stop_loss: f64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    invalidation_condition: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    confidence: f64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    risk_usd: f64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    justification: String,
+}
+
+#[derive(Debug, Deserialize, Copy, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DecisionSignal {
+    BuyToEnter,
+    SellToEnter,
+    Hold,
+    Close,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -297,6 +657,102 @@ struct InstrumentAnalytics {
 struct OpenInterestStats {
     latest: Option<f64>,
     average: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct PerformanceStats {
+    label: String,
+    start_timestamp_ms: i64,
+    trade_count: usize,
+    sharpe_ratio: Option<f64>,
+    total_pnl: f64,
+}
+
+impl PerformanceStats {
+    fn start_time(&self) -> DateTime<Local> {
+        Local
+            .timestamp_millis_opt(self.start_timestamp_ms)
+            .single()
+            .unwrap_or_else(Local::now)
+    }
+
+    fn start_time_label(&self) -> String {
+        self.start_time().format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct PerformanceSummary {
+    overall: Option<PerformanceStats>,
+    recent: Option<PerformanceStats>,
+}
+
+struct PerformanceTracker {
+    start_timestamp_ms: i64,
+    log_store: TradeLogStore,
+}
+
+impl PerformanceTracker {
+    fn new(start_timestamp_ms: i64) -> Self {
+        PerformanceTracker {
+            start_timestamp_ms,
+            log_store: TradeLogStore::new(TradeLogStore::default_path()),
+        }
+    }
+
+    fn summary(&self, recent_window: Duration) -> Result<PerformanceSummary> {
+        let entries = self.log_store.load()?;
+        let overall = self.build_stats(&entries, self.start_timestamp_ms, "运行以来".to_string());
+        let recent = if recent_window.is_zero() {
+            None
+        } else {
+            let chrono_window = ChronoDuration::from_std(recent_window)
+                .unwrap_or_else(|_| ChronoDuration::seconds(0));
+            let recent_start = (Local::now() - chrono_window).timestamp_millis();
+            let label = format!("最近 {}（决策周期）", format_duration_brief(recent_window));
+            self.build_stats(&entries, recent_start, label)
+        };
+        Ok(PerformanceSummary { overall, recent })
+    }
+
+    fn build_stats(
+        &self,
+        entries: &[TradeLogEntry],
+        start_timestamp_ms: i64,
+        label: String,
+    ) -> Option<PerformanceStats> {
+        let start_time = Local
+            .timestamp_millis_opt(start_timestamp_ms)
+            .single()
+            .unwrap_or_else(Local::now);
+        let mut fill_count = 0usize;
+        let mut pnls = Vec::new();
+        for entry in entries {
+            if entry.timestamp < start_time {
+                continue;
+            }
+            if let TradeEvent::Fill(fill) = &entry.event {
+                fill_count += 1;
+                if let Some(pnl) = fill.pnl {
+                    if pnl.is_finite() {
+                        pnls.push(pnl);
+                    }
+                }
+            }
+        }
+        if fill_count == 0 && pnls.is_empty() {
+            return None;
+        }
+        let total_pnl: f64 = pnls.iter().copied().sum();
+        let sharpe_ratio = compute_sharpe(&pnls);
+        Some(PerformanceStats {
+            label,
+            start_timestamp_ms,
+            trade_count: fill_count,
+            sharpe_ratio,
+            total_pnl,
+        })
+    }
 }
 
 struct MarketDataFetcher {
@@ -574,12 +1030,30 @@ struct OpenInterestHistoryEntry {
     oi: String,
 }
 
-fn build_snapshot_prompt(snapshot: &AccountSnapshot, analytics: &[InstrumentAnalytics]) -> String {
+fn build_snapshot_prompt(
+    snapshot: &AccountSnapshot,
+    analytics: &[InstrumentAnalytics],
+    performance: Option<&PerformanceSummary>,
+) -> String {
     let mut buffer = String::new();
     buffer.push_str("以下为 OKX 账户的实时快照，请据此输出风险与操作建议：\n\n");
 
     if let Some(eq) = snapshot.balance.total_equity {
         buffer.push_str(&format!("总权益: {}\n", format_float(eq)));
+    }
+
+    if let Some(summary) = performance {
+        buffer.push_str("\n【策略运行概览】\n");
+        if let Some(overall) = &summary.overall {
+            push_performance_stats(&mut buffer, overall);
+        } else {
+            buffer.push_str("运行以来暂无成交记录\n");
+        }
+        if let Some(recent) = &summary.recent {
+            push_performance_stats(&mut buffer, recent);
+        } else {
+            buffer.push_str("最近决策周期暂无成交记录\n");
+        }
     }
 
     buffer.push_str("\n【持仓情况】\n");
@@ -638,13 +1112,27 @@ fn build_snapshot_prompt(snapshot: &AccountSnapshot, analytics: &[InstrumentAnal
     buffer
 }
 
+fn push_performance_stats(buffer: &mut String, stats: &PerformanceStats) {
+    buffer.push_str(&format!(
+        "{}（统计起点: {}）\n",
+        stats.label,
+        stats.start_time_label()
+    ));
+    buffer.push_str(&format!("- 成交笔数: {}\n", stats.trade_count));
+    buffer.push_str(&format!("- 累计盈亏: {}\n", format_float(stats.total_pnl)));
+    match stats.sharpe_ratio {
+        Some(value) => buffer.push_str(&format!("- 夏普率: {}\n", format_float(value))),
+        None => buffer.push_str("- 夏普率: 数据不足（少于 2 笔成交）\n"),
+    }
+}
+
 fn append_market_analytics(buffer: &mut String, analytics: &[InstrumentAnalytics]) {
     if analytics.is_empty() {
         return;
     }
     buffer.push_str("\n【市场技术指标】\n");
     for entry in analytics {
-        buffer.push_str(&format!("{} ({})\n", entry.symbol, entry.inst_id));
+        buffer.push_str(&format!("## {} ({})\n", entry.symbol, entry.inst_id));
         buffer.push_str("**当前价格**\n");
         buffer.push_str(&format!(
             "- current_price = {}\n",
@@ -836,6 +1324,51 @@ fn format_float(value: f64) -> String {
 
 fn optional_float(value: Option<f64>) -> String {
     value.map(format_float).unwrap_or_else(|| "-".to_string())
+}
+
+fn format_duration_brief(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs == 0 {
+        return "0s".to_string();
+    }
+    if secs % 86_400 == 0 {
+        return format!("{}d", secs / 86_400);
+    }
+    if secs % 3_600 == 0 {
+        return format!("{}h", secs / 3_600);
+    }
+    if secs % 60 == 0 {
+        return format!("{}m", secs / 60);
+    }
+    format!("{}s", secs)
+}
+
+fn compute_sharpe(returns: &[f64]) -> Option<f64> {
+    if returns.len() < 2 {
+        return None;
+    }
+    let mean = returns.iter().copied().sum::<f64>() / returns.len() as f64;
+    let variance = returns
+        .iter()
+        .map(|value| {
+            let diff = *value - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / (returns.len() as f64 - 1.0);
+    if !variance.is_finite() || variance <= 0.0 {
+        return None;
+    }
+    let std_dev = variance.sqrt();
+    if !std_dev.is_finite() || std_dev <= f64::EPSILON {
+        return None;
+    }
+    let sharpe = (mean / std_dev) * (returns.len() as f64).sqrt();
+    if sharpe.is_finite() {
+        Some(sharpe)
+    } else {
+        None
+    }
 }
 
 fn take_tail(values: &[f64], count: usize) -> Vec<f64> {

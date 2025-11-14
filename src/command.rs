@@ -40,6 +40,13 @@ impl TradeSide {
             TradeSide::Sell => "sell",
         }
     }
+
+    pub fn opposite(&self) -> TradeSide {
+        match self {
+            TradeSide::Buy => TradeSide::Sell,
+            TradeSide::Sell => TradeSide::Buy,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

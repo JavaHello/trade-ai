@@ -1,8 +1,14 @@
 use std::collections::HashMap;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
+use anyhow::{Context, Result as AnyResult, anyhow};
+use chrono::Local;
 use clap::Parser;
+use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Clone, Debug)]
 pub struct CliParams {
@@ -254,4 +260,44 @@ fn normalize_endpoint(value: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct AppRunConfig {
+    start_timestamp_ms: i64,
+}
+
+impl AppRunConfig {
+    pub fn load_or_init(path: impl AsRef<Path>) -> AnyResult<Self> {
+        let path = path.as_ref();
+        let start_timestamp_ms = match fs::read_to_string(path) {
+            Ok(contents) => {
+                serde_json::from_str::<StoredAppRunConfig>(&contents)
+                    .with_context(|| format!("解析 {} 失败", path.display()))?
+                    .start_timestamp_ms
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                let now_ms = Local::now().timestamp_millis();
+                let stored = StoredAppRunConfig {
+                    start_timestamp_ms: now_ms,
+                };
+                let payload = serde_json::to_string_pretty(&stored)?;
+                fs::write(path, payload).with_context(|| format!("无法写入 {}", path.display()))?;
+                now_ms
+            }
+            Err(err) => {
+                return Err(anyhow!("读取 {} 失败: {}", path.display(), err));
+            }
+        };
+        Ok(AppRunConfig { start_timestamp_ms })
+    }
+
+    pub fn start_timestamp_ms(&self) -> i64 {
+        self.start_timestamp_ms
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredAppRunConfig {
+    start_timestamp_ms: i64,
 }

@@ -2,6 +2,7 @@ mod ai_log;
 mod command;
 mod config;
 mod deepseek;
+mod error_log;
 mod monitor;
 mod notify;
 mod okx;
@@ -18,6 +19,7 @@ use tokio::task;
 
 use crate::command::{Command, TradingCommand};
 use crate::deepseek::DeepseekReporter;
+use crate::error_log::ErrorLogStore;
 use crate::notify::OsNotification;
 use crate::okx::{
     OkxBusinessWsClient, OkxPrivateWsClient, OkxTradingClient, OkxWsClient, SharedAccountState,
@@ -27,8 +29,29 @@ use crate::tui::TuiApp;
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let param = config::CliParams::parse();
+    let run_config = config::AppRunConfig::load_or_init("config.json")?;
+    let run_start_timestamp_ms = run_config.start_timestamp_ms();
     let deepseek_cfg = param.deepseek_config();
     let (tx, mut rx) = broadcast::channel::<Command>(16);
+    {
+        let mut error_rx = tx.subscribe();
+        let error_log_store = ErrorLogStore::new(ErrorLogStore::default_path());
+        task::spawn(async move {
+            loop {
+                match error_rx.recv().await {
+                    Ok(Command::Error(message)) => {
+                        if let Err(err) = error_log_store.append_message(message) {
+                            eprintln!("failed to persist error log: {err}");
+                        }
+                    }
+                    Ok(Command::Exit) => break,
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+    }
     let trading_cfg = param.trading_config();
     if deepseek_cfg.is_some() && trading_cfg.is_none() {
         let _ = tx.send(Command::Error(
@@ -109,9 +132,18 @@ async fn main() -> Result<(), anyhow::Error> {
     if let (Some(cfg), Some(_)) = (deepseek_cfg.clone(), trading_cfg.clone()) {
         let deepseek_inst_ids = param.inst_ids.clone();
         let deepseek_tx = tx.clone();
+        let deepseek_start_ms = run_start_timestamp_ms;
+        let ai_order_tx = order_tx.clone();
         task::spawn(async move {
             let state = SharedAccountState::global();
-            match DeepseekReporter::new(cfg, state, deepseek_tx.clone(), deepseek_inst_ids) {
+            match DeepseekReporter::new(
+                cfg,
+                state,
+                deepseek_tx.clone(),
+                deepseek_inst_ids,
+                deepseek_start_ms,
+                ai_order_tx,
+            ) {
                 Ok(reporter) => {
                     let exit_rx = deepseek_tx.subscribe();
                     if let Err(err) = reporter.run(exit_rx).await {
@@ -169,7 +201,7 @@ async fn main() -> Result<(), anyhow::Error> {
         &param.inst_ids,
         history_window,
         markets.clone(),
-        order_tx,
+        order_tx.clone(),
         deepseek_cfg.is_some(),
     );
     app.preload_trade_logs();
