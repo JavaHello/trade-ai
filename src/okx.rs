@@ -528,24 +528,32 @@ impl OkxPrivateWsClient {
         self.wait_for_login(&mut ws_tx, &mut ws_rx).await?;
         self.subscribe_private(&mut ws_tx).await?;
         let state = SharedAccountState::global();
-        while let Some(result) = ws_rx.next().await {
-            match result {
-                Ok(Message::Text(text)) => {
-                    self.handle_private_text(&text, state).await?;
+        let mut ping_interval = interval(Duration::from_secs(20));
+        loop {
+            tokio::select! {
+                _ = ping_interval.tick() => {
+                    ws_tx.send(Message::Ping(Vec::new().into())).await?;
                 }
-                Ok(Message::Ping(payload)) => {
-                    ws_tx.send(Message::Pong(payload)).await?;
+                result = ws_rx.next() => {
+                    match result {
+                        Some(Ok(Message::Text(text))) => {
+                            self.handle_private_text(&text, state).await?;
+                        }
+                        Some(Ok(Message::Ping(payload))) => {
+                            ws_tx.send(Message::Pong(payload)).await?;
+                        }
+                        Some(Ok(Message::Close { code, reason })) => {
+                            return Err(anyhow!(
+                                "private websocket closed by server: code={code}, reason={reason:?}"
+                            ));
+                        }
+                        Some(Ok(Message::Pong(_)) | Ok(Message::Binary(_))) => {}
+                        Some(Err(err)) => return Err(err.into()),
+                        None => return Err(anyhow!("private websocket closed")),
+                    }
                 }
-                Ok(Message::Close { code, reason }) => {
-                    return Err(anyhow!(
-                        "private websocket closed by server: code={code}, reason={reason:?}"
-                    ));
-                }
-                Ok(Message::Pong(_)) | Ok(Message::Binary(_)) => {}
-                Err(err) => return Err(err.into()),
             }
         }
-        Err(anyhow!("private websocket closed"))
     }
 
     async fn send_login(
