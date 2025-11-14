@@ -1745,9 +1745,11 @@ impl TuiApp {
         } else if self.trade.ai_insight_count() == 0 {
             lines.push(Line::from("等待 Deepseek 决策 · 按 o 查看原始提示"));
         } else {
-            let summary_width = usize::from(area.width.saturating_sub(10).max(8));
+            let total_width = usize::from(area.width.saturating_sub(10).max(8));
+            let (operation_width, summary_width) = Self::ai_panel_column_widths(total_width);
             lines.push(Line::from(format_columns(&[
                 ("时间", ColumnAlign::Left, 8),
+                ("操作", ColumnAlign::Left, operation_width),
                 ("摘要", ColumnAlign::Left, summary_width),
             ])));
             let len = self.trade.ai_insight_count();
@@ -1756,9 +1758,15 @@ impl TuiApp {
             for idx in start..end {
                 if let Some(entry) = self.trade.ai_insights.get(idx) {
                     let time_label = entry.timestamp.format("%H:%M:%S").to_string();
+                    let operation = entry
+                        .operation
+                        .as_ref()
+                        .map(|op| op.brief_label())
+                        .unwrap_or_else(|| "未识别".to_string());
                     let summary = entry.summary();
                     let row = format_columns(&[
                         (time_label.as_str(), ColumnAlign::Left, 8),
+                        (operation.as_str(), ColumnAlign::Left, operation_width),
                         (summary.as_str(), ColumnAlign::Left, summary_width),
                     ]);
                     let highlight = self.trade.focus == TradeFocus::AiInsights && idx == selected;
@@ -1770,6 +1778,32 @@ impl TuiApp {
             .alignment(Alignment::Left)
             .block(block);
         frame.render_widget(paragraph, area);
+    }
+
+    fn ai_panel_column_widths(total_width: usize) -> (usize, usize) {
+        if total_width <= 16 {
+            let mut operation = (total_width / 2).max(4);
+            if operation >= total_width {
+                operation = total_width.saturating_sub(4).max(4);
+            }
+            let mut summary = total_width.saturating_sub(operation).max(4);
+            if operation + summary > total_width {
+                let overflow = operation + summary - total_width;
+                if summary > overflow {
+                    summary -= overflow;
+                } else if operation > overflow {
+                    operation -= overflow;
+                }
+            }
+            (operation, summary)
+        } else {
+            let mut operation = (total_width / 3).max(10);
+            if operation + 8 > total_width {
+                operation = total_width.saturating_sub(8).max(6);
+            }
+            let summary = total_width.saturating_sub(operation).max(8);
+            (operation, summary)
+        }
     }
 
     fn render_log_row(
@@ -2220,6 +2254,20 @@ impl TuiApp {
             for line in entry.user_prompt.lines() {
                 lines.push(Line::from(line));
             }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "[Decision]",
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(operation) = &entry.operation {
+            for line in operation.detail_lines() {
+                lines.push(Line::from(line));
+            }
+        } else {
+            lines.push(Line::from("未解析到决策操作"));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(

@@ -504,7 +504,13 @@ impl DeepseekReporter {
         let coin = coin.trim().to_ascii_uppercase();
         self.inst_ids
             .iter()
-            .find(|inst| inst.to_ascii_uppercase().starts_with(&format!("{coin}-")))
+            .find(|inst| {
+                if coin.contains('-') {
+                    inst.to_ascii_uppercase() == coin
+                } else {
+                    inst.to_ascii_uppercase().starts_with(&format!("{coin}-"))
+                }
+            })
             .cloned()
     }
 }
