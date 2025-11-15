@@ -151,6 +151,10 @@ const MAX_POSITIONS: usize = 12;
 const MAX_ORDERS: usize = 12;
 const MAX_BALANCES: usize = 12;
 const AI_OPERATOR_NAME: &str = "Deepseek";
+const AI_TAG_ENTRY: &str = "dsentry";
+const AI_TAG_STOP_LOSS: &str = "dssl";
+const AI_TAG_TAKE_PROFIT: &str = "dstp";
+const AI_TAG_CLOSE: &str = "dsclose";
 
 pub struct DeepseekReporter {
     client: DeepseekClient,
@@ -324,7 +328,7 @@ impl DeepseekReporter {
             size: decision.quantity,
             pos_side: None,
             reduce_only: false,
-            tag: Some("deepseek-entry".to_string()),
+            tag: Some(AI_TAG_ENTRY.to_string()),
             operator: ai_operator(),
             leverage: if decision.leverage > 0.0 {
                 Some(decision.leverage)
@@ -359,7 +363,7 @@ impl DeepseekReporter {
                     size: entry.size,
                     pos_side: pos_side.clone(),
                     reduce_only: true,
-                    tag: Some("deepseek-stop-loss".to_string()),
+                    tag: Some(AI_TAG_STOP_LOSS.to_string()),
                     operator: ai_operator(),
                     leverage,
                     kind: TradeOrderKind::StopLoss,
@@ -383,7 +387,7 @@ impl DeepseekReporter {
                     size: entry.size,
                     pos_side: pos_side.clone(),
                     reduce_only: true,
-                    tag: Some("deepseek-take-profit".to_string()),
+                    tag: Some(AI_TAG_TAKE_PROFIT.to_string()),
                     operator: ai_operator(),
                     leverage,
                     kind: TradeOrderKind::TakeProfit,
@@ -439,7 +443,7 @@ impl DeepseekReporter {
             size,
             pos_side,
             reduce_only: true,
-            tag: Some("deepseek-close".to_string()),
+            tag: Some(AI_TAG_CLOSE.to_string()),
             operator: ai_operator(),
             leverage: position.lever,
             kind: TradeOrderKind::Regular,

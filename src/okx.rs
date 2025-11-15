@@ -367,8 +367,8 @@ impl OkxTradingClient {
             .send()
             .await
             .with_context(|| "sending algo order to OKX")?
-            .error_for_status()
-            .with_context(|| "OKX returned non-success status for algo order")?
+            // .error_for_status()
+            // .with_context(|| "OKX returned non-success status for algo order")?
             .json::<AlgoOrderResponse>()
             .await
             .with_context(|| "decoding OKX algo order response")?;
@@ -1253,6 +1253,23 @@ fn pos_side_for(inst_id: &str, side: TradeSide) -> Option<&'static str> {
     None
 }
 
+fn sanitize_order_tag(tag: &Option<String>) -> Option<String> {
+    let raw = tag.as_ref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let filtered: String = raw
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(16)
+        .collect();
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(filtered)
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TradeOrderRequest {
@@ -1288,7 +1305,7 @@ impl TradeOrderRequest {
             } else {
                 None
             },
-            tag: request.tag.clone(),
+            tag: sanitize_order_tag(&request.tag),
         }
     }
 }
@@ -1345,7 +1362,7 @@ impl AlgoOrderRequest {
             tp_ord_px,
             sl_trigger_px,
             sl_ord_px,
-            tag: request.tag.clone(),
+            tag: sanitize_order_tag(&request.tag),
         }
     }
 }

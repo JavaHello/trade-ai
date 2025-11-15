@@ -2027,8 +2027,8 @@ impl TuiApp {
         }
         let lowered = tag.to_ascii_lowercase();
         match lowered.as_str() {
-            "tp" | "takeprofit" | "take_profit" | "take-profit" => Some("止盈"),
-            "sl" | "stoploss" | "stop_loss" | "stop-loss" => Some("止损"),
+            "tp" | "takeprofit" | "take_profit" | "take-profit" | "dstp" => Some("止盈"),
+            "sl" | "stoploss" | "stop_loss" | "stop-loss" | "dssl" => Some("止损"),
             _ => None,
         }
     }
