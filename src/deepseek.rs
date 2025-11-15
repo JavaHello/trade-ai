@@ -121,6 +121,7 @@ const SYSTEM_PROMPT: &str = r#"
 
 ## 输出验证规则
 - 所有数值字段必须为正数（信号为“hold”时除外）
+- **数量粒度**：除信号为 “hold” 外，`quantity` 必须是 0.01 的整数倍（0.01 × n）
 - 做多时，profit_target 必须高于入场价；做空时，profit_target 必须低于入场价
 - 做多时，stop_loss 必须低于入场价；做空时，stop_loss 必须高于入场价
 - 理由必须简洁明了（最多 500 个字符）
