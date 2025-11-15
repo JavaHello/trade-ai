@@ -2037,11 +2037,18 @@ fn parse_i64_str(value: &str) -> Option<i64> {
     }
 }
 
+const MIN_BALANCE_VALUE_USD: f64 = 1.0;
+
 fn aggregate_balance_details<'a, I>(details: I) -> Vec<AccountBalanceDelta>
 where
     I: Iterator<Item = &'a BalanceDetail>,
 {
-    let mut map: HashMap<String, AccountBalanceDelta> = HashMap::new();
+    struct BalanceAggregate {
+        delta: AccountBalanceDelta,
+        usd_value: Option<f64>,
+    }
+
+    let mut map: HashMap<String, BalanceAggregate> = HashMap::new();
     for detail in details {
         if let Some(avail_eq) = parse_optional_float(detail.avail_eq.clone()) {
             if avail_eq <= 0.0 {
@@ -2050,24 +2057,37 @@ where
         }
         let entry = map
             .entry(detail.ccy.clone())
-            .or_insert(AccountBalanceDelta {
-                currency: detail.ccy.clone(),
-                cash_balance: None,
-                equity: None,
-                available: None,
+            .or_insert_with(|| BalanceAggregate {
+                delta: AccountBalanceDelta {
+                    currency: detail.ccy.clone(),
+                    cash_balance: None,
+                    equity: None,
+                    available: None,
+                },
+                usd_value: None,
             });
         accumulate_balance(
-            &mut entry.cash_balance,
+            &mut entry.delta.cash_balance,
             parse_optional_float(detail.cash_bal.clone()),
         );
-        accumulate_balance(&mut entry.equity, parse_optional_float(detail.eq.clone()));
+        accumulate_balance(&mut entry.delta.equity, parse_optional_float(detail.eq.clone()));
         let available = parse_optional_float(detail.avail_eq.clone())
             .or_else(|| parse_optional_float(detail.avail_bal.clone()));
-        accumulate_balance(&mut entry.available, available);
+        accumulate_balance(&mut entry.delta.available, available);
+        accumulate_balance(&mut entry.usd_value, parse_optional_float(detail.eq_usd.clone()));
     }
     let mut balances: Vec<_> = map.into_values().collect();
-    balances.sort_by(|a, b| a.currency.cmp(&b.currency));
+    balances.retain(|entry| {
+        entry
+            .usd_value
+            .map(|value| value >= MIN_BALANCE_VALUE_USD)
+            .unwrap_or(true)
+    });
+    balances.sort_by(|a, b| a.delta.currency.cmp(&b.delta.currency));
     balances
+        .into_iter()
+        .map(|entry| entry.delta)
+        .collect()
 }
 
 fn accumulate_balance(target: &mut Option<f64>, value: Option<f64>) {
@@ -2379,6 +2399,8 @@ struct BalanceDetail {
     avail_eq: Option<String>,
     #[serde(default)]
     eq: Option<String>,
+    #[serde(default)]
+    eq_usd: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
