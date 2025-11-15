@@ -2816,9 +2816,6 @@ impl TuiApp {
                     let step = self.trade.ai_detail_view_height.max(1) as i16;
                     self.trade.scroll_ai_detail(-step);
                 }
-                KeyCode::Tab | KeyCode::BackTab => {
-                    self.set_status_message("AI 详情聚焦中，按 O 关闭");
-                }
                 _ => {}
             }
             return;
@@ -2826,14 +2823,9 @@ impl TuiApp {
         match key.code {
             KeyCode::Tab => {
                 self.trade.cycle_focus(false);
-                self.set_status_message(format!("焦点切换至 {} (Tab)", self.trade.focus_label()));
             }
             KeyCode::BackTab => {
                 self.trade.cycle_focus(true);
-                self.set_status_message(format!(
-                    "焦点切换至 {} (Shift+Tab)",
-                    self.trade.focus_label()
-                ));
             }
             KeyCode::Up => {
                 self.trade.move_focus(&self.inst_ids, -1);
