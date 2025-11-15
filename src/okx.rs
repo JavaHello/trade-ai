@@ -240,6 +240,19 @@ impl OkxTradingClient {
                             kind: request.kind,
                         },
                     };
+                    if !response.success {
+                        let side_label = match response.side {
+                            TradeSide::Buy => "买入",
+                            TradeSide::Sell => "卖出",
+                        };
+                        let message = format!(
+                            "{inst} {side} 委托失败: {msg}",
+                            inst = response.inst_id,
+                            side = side_label,
+                            msg = response.message
+                        );
+                        let _ = self.tx.send(Command::Error(message));
+                    }
                     let _ = self
                         .tx
                         .send(Command::TradeResult(TradeEvent::Order(response)));
@@ -256,6 +269,14 @@ impl OkxTradingClient {
                             pos_side: request.pos_side.clone(),
                         },
                     };
+                    if !response.success {
+                        let message = format!(
+                            "{inst} 撤单失败: {msg}",
+                            inst = response.inst_id,
+                            msg = response.message
+                        );
+                        let _ = self.tx.send(Command::Error(message));
+                    }
                     let _ = self
                         .tx
                         .send(Command::TradeResult(TradeEvent::Cancel(response)));
