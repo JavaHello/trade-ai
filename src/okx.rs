@@ -2070,11 +2070,17 @@ where
             &mut entry.delta.cash_balance,
             parse_optional_float(detail.cash_bal.clone()),
         );
-        accumulate_balance(&mut entry.delta.equity, parse_optional_float(detail.eq.clone()));
+        accumulate_balance(
+            &mut entry.delta.equity,
+            parse_optional_float(detail.eq.clone()),
+        );
         let available = parse_optional_float(detail.avail_eq.clone())
             .or_else(|| parse_optional_float(detail.avail_bal.clone()));
         accumulate_balance(&mut entry.delta.available, available);
-        accumulate_balance(&mut entry.usd_value, parse_optional_float(detail.eq_usd.clone()));
+        accumulate_balance(
+            &mut entry.usd_value,
+            parse_optional_float(detail.eq_usd.clone()),
+        );
     }
     let mut balances: Vec<_> = map.into_values().collect();
     balances.retain(|entry| {
@@ -2084,10 +2090,7 @@ where
             .unwrap_or(true)
     });
     balances.sort_by(|a, b| a.delta.currency.cmp(&b.delta.currency));
-    balances
-        .into_iter()
-        .map(|entry| entry.delta)
-        .collect()
+    balances.into_iter().map(|entry| entry.delta).collect()
 }
 
 fn accumulate_balance(target: &mut Option<f64>, value: Option<f64>) {

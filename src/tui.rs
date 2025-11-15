@@ -1578,22 +1578,11 @@ impl TuiApp {
             }
             summary_line.push_str(" · t 返回图表");
             instruction_lines.push(summary_line);
-            if let Some(focus_hint) = self.focus_shortcut_hint() {
-                instruction_lines.push(focus_hint);
-            }
-            if self.trade.ai_panel_enabled() {
-                instruction_lines.push(
-                    "AI 决策：↑↓/j k 浏览 · PageUp/PageDown 翻页 · o 查看系统提示与用户输入"
-                        .to_string(),
-                );
-            }
+            self.push_focus_hints(&mut instruction_lines);
         } else {
             instruction_lines
                 .push("未配置 OKX API，仅显示行情 · Tab 切换 · ↑↓ 浏览 · t 返回图表".to_string());
-            if self.trade.ai_panel_enabled() {
-                instruction_lines
-                    .push("AI 决策：↑↓/j k 浏览 · o 查看系统提示与用户输入".to_string());
-            }
+            self.push_focus_hints(&mut instruction_lines);
         }
         instruction_lines
     }
@@ -1620,6 +1609,12 @@ impl TuiApp {
             }
         };
         Some(hint.to_string())
+    }
+
+    fn push_focus_hints(&self, lines: &mut Vec<String>) {
+        if let Some(focus_hint) = self.focus_shortcut_hint() {
+            lines.push(focus_hint);
+        }
     }
 
     fn render_trade_activity(&mut self, frame: &mut Frame, area: Rect) {
