@@ -2795,7 +2795,6 @@ impl TuiApp {
             match key.code {
                 KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Esc => {
                     self.trade.toggle_ai_detail();
-                    self.set_status_message("已关闭 AI 详情 (O)");
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
                     self.trade.scroll_ai_detail(1);
