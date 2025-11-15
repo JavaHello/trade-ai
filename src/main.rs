@@ -134,6 +134,7 @@ async fn main() -> Result<(), anyhow::Error> {
         let deepseek_tx = tx.clone();
         let deepseek_start_ms = run_start_timestamp_ms;
         let ai_order_tx = order_tx.clone();
+        let deepseek_markets = markets.clone();
         task::spawn(async move {
             let state = SharedAccountState::global();
             match DeepseekReporter::new(
@@ -141,6 +142,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 state,
                 deepseek_tx.clone(),
                 deepseek_inst_ids,
+                deepseek_markets,
                 deepseek_start_ms,
                 ai_order_tx,
             ) {

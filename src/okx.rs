@@ -1759,10 +1759,18 @@ async fn fetch_account_instruments(
             ));
         }
         for entry in response.data {
+            let ct_val = entry.ct_val.parse::<f64>().unwrap_or(0.0);
+            let min_size = entry
+                .min_sz
+                .as_deref()
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(0.0);
             instruments.insert(
                 entry.inst_id.clone(),
                 MarketInfo {
-                    ct_val: entry.ct_val.parse::<f64>().unwrap_or(0.0),
+                    ct_val,
+                    ct_val_ccy: entry.ct_val_ccy.clone(),
+                    min_size,
                     lever: 1.0,
                 },
             );
@@ -2386,6 +2394,10 @@ struct InstrumentsResponse {
 struct InstrumentsEntry {
     inst_id: String,
     ct_val: String,
+    #[serde(default)]
+    ct_val_ccy: Option<String>,
+    #[serde(default)]
+    min_sz: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2604,6 +2616,8 @@ impl SharedAccountState {
 #[derive(Debug, Clone)]
 pub struct MarketInfo {
     pub ct_val: f64,
+    pub ct_val_ccy: Option<String>,
+    pub min_size: f64,
     pub lever: f64,
 }
 

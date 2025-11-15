@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -13,7 +13,7 @@ use crate::command::{
     TradeEvent, TradeOperator, TradeOrderKind, TradeRequest, TradeSide, TradingCommand,
 };
 use crate::config::DeepseekConfig;
-use crate::okx::SharedAccountState;
+use crate::okx::{MarketInfo, SharedAccountState};
 use crate::trade_log::{TradeLogEntry, TradeLogStore};
 
 const SYSTEM_PROMPT: &str = r#"
@@ -162,6 +162,7 @@ pub struct DeepseekReporter {
     tx: broadcast::Sender<Command>,
     interval: Duration,
     inst_ids: Vec<String>,
+    markets: HashMap<String, MarketInfo>,
     market: MarketDataFetcher,
     performance: PerformanceTracker,
     order_tx: Option<mpsc::Sender<TradingCommand>>,
@@ -173,6 +174,7 @@ impl DeepseekReporter {
         state: SharedAccountState,
         tx: broadcast::Sender<Command>,
         inst_ids: Vec<String>,
+        markets: HashMap<String, MarketInfo>,
         start_timestamp_ms: i64,
         order_tx: Option<mpsc::Sender<TradingCommand>>,
     ) -> Result<Self> {
@@ -186,6 +188,7 @@ impl DeepseekReporter {
             tx,
             interval: config.interval,
             inst_ids,
+            markets,
             market,
             performance,
             order_tx,
@@ -232,7 +235,13 @@ impl DeepseekReporter {
                 None
             }
         };
-        let prompt = build_snapshot_prompt(&snapshot, &analytics, performance.as_ref());
+        let prompt = build_snapshot_prompt(
+            &snapshot,
+            &analytics,
+            performance.as_ref(),
+            &self.inst_ids,
+            &self.markets,
+        );
         let insight = self.client.chat_completion(&prompt).await?;
         let trimmed = insight.trim();
         if trimmed.is_empty() {
@@ -1047,6 +1056,8 @@ fn build_snapshot_prompt(
     snapshot: &AccountSnapshot,
     analytics: &[InstrumentAnalytics],
     performance: Option<&PerformanceSummary>,
+    inst_ids: &[String],
+    markets: &HashMap<String, MarketInfo>,
 ) -> String {
     let mut buffer = String::new();
     buffer.push_str("以下为 OKX 账户的实时快照，请据此输出风险与操作建议：\n\n");
@@ -1120,9 +1131,41 @@ fn build_snapshot_prompt(
         }
     }
 
+    append_trade_limits(&mut buffer, inst_ids, markets, analytics);
     append_market_analytics(&mut buffer, analytics);
 
     buffer
+}
+
+fn append_trade_limits(
+    buffer: &mut String,
+    inst_ids: &[String],
+    markets: &HashMap<String, MarketInfo>,
+    analytics: &[InstrumentAnalytics],
+) {
+    if inst_ids.is_empty() || markets.is_empty() {
+        return;
+    }
+    let mut price_lookup = HashMap::new();
+    for entry in analytics {
+        if let Some(price) = entry.current_price {
+            price_lookup.insert(entry.inst_id.to_ascii_uppercase(), price);
+        }
+    }
+    let mut appended = false;
+    for inst_id in inst_ids {
+        let Some(market) = markets.get(inst_id) else {
+            continue;
+        };
+        if !appended {
+            buffer.push_str("\n【最小交易金额】\n");
+            appended = true;
+        }
+        let price = price_lookup.get(&inst_id.to_ascii_uppercase()).copied();
+        buffer.push_str("- ");
+        buffer.push_str(&format_trade_limit(inst_id, market, price));
+        buffer.push('\n');
+    }
 }
 
 fn push_performance_stats(buffer: &mut String, stats: &PerformanceStats) {
@@ -1137,6 +1180,67 @@ fn push_performance_stats(buffer: &mut String, stats: &PerformanceStats) {
         Some(value) => buffer.push_str(&format!("- 夏普率: {}\n", format_float(value))),
         None => buffer.push_str("- 夏普率: 数据不足（少于 2 笔成交）\n"),
     }
+}
+
+fn format_trade_limit(inst_id: &str, market: &MarketInfo, latest_price: Option<f64>) -> String {
+    let mut segments = Vec::new();
+    if market.min_size > 0.0 {
+        segments.push(format!(
+            "最小 {} 张",
+            format_contract_count(market.min_size)
+        ));
+    } else {
+        segments.push("最小张数未知".to_string());
+    }
+    if market.ct_val > 0.0 {
+        let face = format_float(market.ct_val);
+        match market
+            .ct_val_ccy
+            .as_deref()
+            .map(|ccy| ccy.trim())
+            .filter(|value| !value.is_empty())
+        {
+            Some(ccy) => segments.push(format!("单张面值 {} {}", face, ccy)),
+            None => segments.push(format!("单张面值 {}", face)),
+        }
+    }
+    if market.ct_val > 0.0 && market.min_size > 0.0 {
+        let notional = market.ct_val * market.min_size;
+        let label = format_float(notional);
+        match market
+            .ct_val_ccy
+            .as_deref()
+            .map(|ccy| ccy.trim())
+            .filter(|value| !value.is_empty())
+        {
+            Some(ccy) => segments.push(format!("最小名义 {} {}", label, ccy)),
+            None => segments.push(format!("最小名义 {}", label)),
+        }
+        if is_usdt_quote(inst_id) {
+            if let Some(price) = latest_price {
+                let approx = price * notional;
+                segments.push(format!("按现价约 {} USDT", format_float(approx)));
+            }
+        }
+    }
+    format!("{}: {}", inst_id, segments.join(" · "))
+}
+
+fn format_contract_count(value: f64) -> String {
+    if !value.is_finite() || value <= 0.0 {
+        return "-".to_string();
+    }
+    let rounded = value.round();
+    if (value - rounded).abs() < 1e-6 {
+        format!("{}", rounded as i64)
+    } else {
+        format_float(value)
+    }
+}
+
+fn is_usdt_quote(inst_id: &str) -> bool {
+    let upper = inst_id.to_ascii_uppercase();
+    upper.ends_with("-USDT") || upper.contains("-USDT-")
 }
 
 fn append_market_analytics(buffer: &mut String, analytics: &[InstrumentAnalytics]) {
