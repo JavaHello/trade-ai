@@ -45,6 +45,47 @@ const MAX_AI_INSIGHTS: usize = 64;
 const LEVERAGE_EPSILON: f64 = 1e-6;
 const AI_INDEX_COLUMN_WIDTH: usize = 5;
 const AI_TIME_COLUMN_WIDTH: usize = 8;
+const LOADING_SPINNER_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+
+struct LoadingOverlay {
+    message: String,
+    spinner_index: usize,
+    last_tick: Instant,
+    block_input: bool,
+}
+
+impl LoadingOverlay {
+    fn new(message: impl Into<String>, block_input: bool) -> Self {
+        LoadingOverlay {
+            message: message.into(),
+            spinner_index: 0,
+            last_tick: Instant::now(),
+            block_input,
+        }
+    }
+
+    fn tick(&mut self) -> bool {
+        let interval = Duration::from_millis(120);
+        if self.last_tick.elapsed() < interval {
+            return false;
+        }
+        self.spinner_index = (self.spinner_index + 1) % LOADING_SPINNER_FRAMES.len();
+        self.last_tick = Instant::now();
+        true
+    }
+
+    fn spinner(&self) -> char {
+        LOADING_SPINNER_FRAMES[self.spinner_index % LOADING_SPINNER_FRAMES.len()]
+    }
+
+    fn message(&self) -> &str {
+        &self.message
+    }
+
+    fn blocks_input(&self) -> bool {
+        self.block_input
+    }
+}
 
 #[derive(Clone, Debug)]
 struct AxisInfo {
@@ -804,6 +845,10 @@ impl TradeState {
         None
     }
 
+    fn update_markets(&mut self, markets: HashMap<String, MarketInfo>) {
+        self.markets = markets;
+    }
+
     fn selected_log_display_index(&self) -> usize {
         if self.logs.is_empty() {
             0
@@ -907,14 +952,23 @@ pub struct TuiApp {
     view_mode: ViewMode,
     trade: TradeState,
     exit_confirmation: bool,
+    loading_overlay: Option<LoadingOverlay>,
 }
 impl TuiApp {
+    fn is_exit_key(key: &KeyEvent) -> bool {
+        matches!(
+            key.code,
+            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc
+        ) || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+    }
+
     pub fn new(
         inst_ids: &[String],
         retention: Duration,
         markets: HashMap<String, MarketInfo>,
         order_tx: Option<mpsc::Sender<TradingCommand>>,
         ai_enabled: bool,
+        wait_for_markets: bool,
     ) -> TuiApp {
         let min_redraw_gap = Duration::from_millis(100);
         let inst_ids = if inst_ids.is_empty() {
@@ -931,6 +985,11 @@ impl TuiApp {
         let log_store = TradeLogStore::new(TradeLogStore::default_path());
         let ai_store = if ai_enabled {
             Some(AiDecisionStore::new(AiDecisionStore::default_path()))
+        } else {
+            None
+        };
+        let loading_overlay = if wait_for_markets {
+            Some(LoadingOverlay::new("正在加载交易品种数据...", true))
         } else {
             None
         };
@@ -954,6 +1013,7 @@ impl TuiApp {
             view_mode: ViewMode::Chart,
             trade: TradeState::new(order_tx, Some(log_store), ai_store, markets, ai_enabled),
             exit_confirmation: false,
+            loading_overlay,
         }
     }
 
@@ -986,6 +1046,29 @@ impl TuiApp {
         self.status_is_error = false;
     }
 
+    fn loading_blocks_input(&self) -> bool {
+        self.loading_overlay
+            .as_ref()
+            .map(|overlay| overlay.blocks_input())
+            .unwrap_or(false)
+    }
+
+    fn update_loading_overlay_animation(&mut self) -> bool {
+        if let Some(overlay) = &mut self.loading_overlay {
+            return overlay.tick();
+        }
+        false
+    }
+
+    fn finish_market_loading(&mut self, loaded: bool) {
+        self.loading_overlay = None;
+        if loaded {
+            self.set_status_message("币种数据加载完成，可开始操作");
+        } else {
+            self.set_error_status_message("未能加载币种数据，部分功能可能受限");
+        }
+    }
+
     pub fn dispose(&self) {
         ratatui::restore();
     }
@@ -1010,12 +1093,22 @@ impl TuiApp {
         color_eyre::install()?;
         let mut terminal = ratatui::init();
         let mut input_tick = tokio::time::interval(self.min_redraw_gap);
+        terminal.draw(|frame| self.render(frame))?;
+        self.last_draw = Instant::now();
         loop {
             tokio::select! {
                 biased;
                 _ = input_tick.tick() => {
+                    let mut should_redraw = false;
+                    if self.update_loading_overlay_animation() {
+                        should_redraw = true;
+                    }
                     if self.poll_input()? {
                         return Ok(());
+                    }
+                    if should_redraw && self.last_draw.elapsed() >= self.min_redraw_gap {
+                        terminal.draw(|frame| self.render(frame))?;
+                        self.last_draw = Instant::now();
                     }
                 }
                 result = rx.recv() => {
@@ -1107,6 +1200,13 @@ impl TuiApp {
                             terminal.draw(|frame| self.render(frame))?;
                             self.last_draw = Instant::now();
                         }
+                        Ok(Command::MarketsLoaded(markets)) => {
+                            let has_data = !markets.is_empty();
+                            self.trade.update_markets(markets);
+                            self.finish_market_loading(has_data);
+                            terminal.draw(|frame| self.render(frame))?;
+                            self.last_draw = Instant::now();
+                        }
                         Ok(Command::Exit) => {
                             return Ok(());
                         }
@@ -1162,6 +1262,9 @@ impl TuiApp {
         }
         if self.exit_confirmation {
             self.render_exit_confirmation(frame);
+        }
+        if self.loading_overlay.is_some() {
+            self.render_loading_overlay(frame);
         }
     }
 
@@ -1235,6 +1338,36 @@ impl TuiApp {
             .block(Block::bordered().title("确认退出"));
         frame.render_widget(Clear, popup);
         frame.render_widget(paragraph, popup);
+    }
+
+    fn render_loading_overlay(&self, frame: &mut Frame) {
+        if let Some(overlay) = &self.loading_overlay {
+            let area = frame.area();
+            if area.width < 24 || area.height < 5 {
+                return;
+            }
+            let popup_width = area.width.saturating_sub(10).min(60).max(30);
+            let popup_height = 6;
+            let left = area.x + (area.width.saturating_sub(popup_width)) / 2;
+            let top = area.y + (area.height.saturating_sub(popup_height)) / 2;
+            let popup = Rect::new(left, top, popup_width, popup_height);
+            let message = format!("{} {}", overlay.spinner(), overlay.message());
+            let lines = vec![
+                Line::from(Span::styled(
+                    message,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from("正在同步 OKX 合约信息，加载完成前仅支持退出 (Q/Esc)"),
+            ];
+            let paragraph = Paragraph::new(lines)
+                .alignment(Alignment::Left)
+                .wrap(Wrap { trim: true })
+                .block(Block::bordered().title("初始化中"));
+            frame.render_widget(Clear, popup);
+            frame.render_widget(paragraph, popup);
+        }
     }
 
     fn render_trade_panel(&mut self, frame: &mut Frame, area: Rect) {
@@ -2696,6 +2829,10 @@ impl TuiApp {
                 self.prompt_exit_confirmation();
                 return Ok(false);
             }
+        }
+        if self.loading_blocks_input() && !Self::is_exit_key(&key) {
+            self.set_status_message("币种数据正在加载，完成后即可操作. 按 Q/Esc 可退出");
+            return Ok(false);
         }
         if self.trade.input.is_some() {
             self.handle_order_input_key(key);

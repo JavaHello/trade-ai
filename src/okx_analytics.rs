@@ -222,7 +222,7 @@ impl MarketDataFetcher {
         let response: OpenInterestHistoryResponse = self
             .http
             .get(OPEN_INTEREST_HISTORY_ENDPOINT)
-            .query(&[("instType", "SWAP"), ("instId", inst_id), ("period", "8H")])
+            .query(&[("instType", "SWAP"), ("instId", inst_id), ("period", "6H")])
             .send()
             .await
             .with_context(|| format!("请求 {} 未平仓合约历史失败", inst_id))?
@@ -239,8 +239,11 @@ impl MarketDataFetcher {
         }
         let mut values = Vec::new();
         for entry in response.data {
-            if let Some(value) = parse_f64(&entry.oi) {
-                values.push(value);
+            if entry.len() < 2 {
+                continue;
+            }
+            if let Some(oi) = parse_f64(&entry[1]) {
+                values.push(oi);
             }
         }
         Ok(values)
@@ -311,14 +314,9 @@ struct OpenInterestEntry {
 struct OpenInterestHistoryResponse {
     code: String,
     msg: String,
-    data: Vec<OpenInterestHistoryEntry>,
+    data: Vec<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenInterestHistoryEntry {
-    oi: String,
-}
 
 fn take_tail(values: &[f64], count: usize) -> Vec<f64> {
     if count == 0 || values.is_empty() {

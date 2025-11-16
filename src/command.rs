@@ -1,4 +1,8 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+use crate::okx::MarketInfo;
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -8,6 +12,7 @@ pub enum Command {
     Error(String),
     TradeResult(TradeEvent),
     AccountSnapshot(AccountSnapshot),
+    MarketsLoaded(HashMap<String, MarketInfo>),
     Exit,
 }
 

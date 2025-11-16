@@ -59,12 +59,6 @@ async fn main() -> Result<(), anyhow::Error> {
             "已启用 Deepseek 集成，但缺少 OKX API 配置，无法获取账户信息".to_string(),
         ));
     }
-    let markets = if let Some(cfg) = trading_cfg.clone() {
-        let inst_ids = param.inst_ids.clone();
-        okx::fetch_market_info(&param.okx_td_mode, &cfg, &inst_ids).await?
-    } else {
-        HashMap::new()
-    };
     let order_tx = if let Some(trading_cfg) = trading_cfg.clone() {
         let (trade_tx, trade_rx) = mpsc::channel::<TradingCommand>(32);
         let trading_tx = tx.clone();
@@ -86,6 +80,54 @@ async fn main() -> Result<(), anyhow::Error> {
     } else {
         None
     };
+    if let Some(market_cfg) = trading_cfg.clone() {
+        let inst_ids = param.inst_ids.clone();
+        let td_mode = param.okx_td_mode.clone();
+        let market_tx = tx.clone();
+        let deepseek_cfg_for_market = deepseek_cfg.clone();
+        let deepseek_inst_ids = param.inst_ids.clone();
+        let deepseek_start_ms = run_start_timestamp_ms;
+        let deepseek_tx = tx.clone();
+        let ai_order_tx = order_tx.clone();
+        task::spawn(async move {
+            match okx::fetch_market_info(&td_mode, &market_cfg, &inst_ids).await {
+                Ok(markets) => {
+                    let _ = market_tx.send(Command::MarketsLoaded(markets.clone()));
+                    if let Some(cfg) = deepseek_cfg_for_market {
+                        let state = SharedAccountState::global();
+                        match DeepseekReporter::new(
+                            cfg,
+                            state,
+                            deepseek_tx.clone(),
+                            deepseek_inst_ids,
+                            markets,
+                            deepseek_start_ms,
+                            ai_order_tx,
+                        ) {
+                            Ok(reporter) => {
+                                let exit_rx = deepseek_tx.subscribe();
+                                task::spawn(async move {
+                                    if let Err(err) = reporter.run(exit_rx).await {
+                                        let _ = deepseek_tx.send(Command::Error(format!(
+                                            "Deepseek reporter error: {err}"
+                                        )));
+                                    }
+                                });
+                            }
+                            Err(err) => {
+                                let _ = deepseek_tx
+                                    .send(Command::Error(format!("Deepseek 初始化失败: {err}")));
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    let _ = market_tx.send(Command::Error(format!("获取币种信息失败: {err}")));
+                    let _ = market_tx.send(Command::MarketsLoaded(HashMap::new()));
+                }
+            }
+        });
+    }
     if let Some(snapshot_cfg) = trading_cfg.clone() {
         let inst_ids = param.inst_ids.clone();
         let snapshot_tx = tx.clone();
@@ -127,36 +169,6 @@ async fn main() -> Result<(), anyhow::Error> {
             .await;
             if let Err(err) = result {
                 let _ = business_tx.send(Command::Error(format!("okx business ws error: {err}")));
-            }
-        });
-    }
-    if let (Some(cfg), Some(_)) = (deepseek_cfg.clone(), trading_cfg.clone()) {
-        let deepseek_inst_ids = param.inst_ids.clone();
-        let deepseek_tx = tx.clone();
-        let deepseek_start_ms = run_start_timestamp_ms;
-        let ai_order_tx = order_tx.clone();
-        let deepseek_markets = markets.clone();
-        task::spawn(async move {
-            let state = SharedAccountState::global();
-            match DeepseekReporter::new(
-                cfg,
-                state,
-                deepseek_tx.clone(),
-                deepseek_inst_ids,
-                deepseek_markets,
-                deepseek_start_ms,
-                ai_order_tx,
-            ) {
-                Ok(reporter) => {
-                    let exit_rx = deepseek_tx.subscribe();
-                    if let Err(err) = reporter.run(exit_rx).await {
-                        let _ = deepseek_tx
-                            .send(Command::Error(format!("Deepseek reporter error: {err}")));
-                    }
-                }
-                Err(err) => {
-                    let _ = deepseek_tx.send(Command::Error(format!("Deepseek 初始化失败: {err}")));
-                }
             }
         });
     }
@@ -203,9 +215,10 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut app = TuiApp::new(
         &param.inst_ids,
         history_window,
-        markets.clone(),
+        HashMap::new(),
         order_tx.clone(),
         deepseek_cfg.is_some(),
+        trading_cfg.is_some(),
     );
     app.preload_trade_logs();
     app.preload_ai_insights();
