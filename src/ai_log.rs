@@ -15,7 +15,7 @@ pub struct AiDecisionRecord {
     pub user_prompt: String,
     pub response: String,
     pub justification: Option<String>,
-    pub operation: Option<AiDecisionOperation>,
+    pub operations: Vec<AiDecisionOperation>,
 }
 
 impl AiDecisionRecord {
@@ -24,14 +24,14 @@ impl AiDecisionRecord {
             LocalResult::Single(dt) => dt,
             _ => Local::now(),
         };
-        let (justification, operation) = Self::analyze_response(&payload.response, None);
+        let (justification, operations) = Self::analyze_response(&payload.response, None);
         AiDecisionRecord {
             timestamp,
             system_prompt: payload.system_prompt,
             user_prompt: payload.user_prompt,
             response: payload.response,
             justification,
-            operation,
+            operations,
         }
     }
 
@@ -40,6 +40,17 @@ impl AiDecisionRecord {
             let trimmed = justification.trim();
             if !trimmed.is_empty() {
                 return trimmed.to_string();
+            }
+        }
+        if !self.operations.is_empty() {
+            let labels = self
+                .operations
+                .iter()
+                .map(|op| op.brief_label())
+                .collect::<Vec<_>>();
+            let joined = labels.join(" | ");
+            if !joined.is_empty() {
+                return joined;
             }
         }
         let mut fragments = self
@@ -72,21 +83,25 @@ impl AiDecisionRecord {
         user_prompt: String,
         response: String,
         justification: Option<String>,
-        operation: Option<AiDecisionOperation>,
+        operations: Vec<AiDecisionOperation>,
     ) -> Self {
         let timestamp = match Local.timestamp_millis_opt(timestamp_ms) {
             LocalResult::Single(dt) => dt,
             _ => Local::now(),
         };
-        let (justification, derived_operation) = Self::analyze_response(&response, justification);
-        let operation = operation.or(derived_operation);
+        let (justification, derived_operations) = Self::analyze_response(&response, justification);
+        let operations = if operations.is_empty() {
+            derived_operations
+        } else {
+            operations
+        };
         AiDecisionRecord {
             timestamp,
             system_prompt,
             user_prompt,
             response,
             justification,
-            operation,
+            operations,
         }
     }
 
@@ -97,11 +112,11 @@ impl AiDecisionRecord {
     fn analyze_response(
         response: &str,
         provided: Option<String>,
-    ) -> (Option<String>, Option<AiDecisionOperation>) {
+    ) -> (Option<String>, Vec<AiDecisionOperation>) {
         let parsed = Self::parse_json_block(response);
         let justification = Self::derive_justification(parsed.as_ref(), provided);
-        let operation = Self::derive_operation(parsed.as_ref());
-        (justification, operation)
+        let operations = Self::derive_operations(parsed.as_ref());
+        (justification, operations)
     }
 
     fn parse_json_block(response: &str) -> Option<serde_json::Value> {
@@ -128,15 +143,40 @@ impl AiDecisionRecord {
         if normalized.is_some() {
             return normalized;
         }
-        parsed
-            .and_then(|value| value.get("justification"))
-            .and_then(|field| field.as_str())
-            .map(|text| text.trim().to_string())
-            .filter(|text| !text.is_empty())
+        match parsed {
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(|item| item.get("justification"))
+                .filter_map(|field| field.as_str())
+                .map(|text| text.trim().to_string())
+                .find(|text| !text.is_empty()),
+            Some(value) => value
+                .get("justification")
+                .and_then(|field| field.as_str())
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty()),
+            None => None,
+        }
     }
 
-    fn derive_operation(parsed: Option<&serde_json::Value>) -> Option<AiDecisionOperation> {
-        parsed.and_then(AiDecisionOperation::from_value)
+    fn derive_operations(parsed: Option<&serde_json::Value>) -> Vec<AiDecisionOperation> {
+        let mut operations = Vec::new();
+        match parsed {
+            Some(serde_json::Value::Array(items)) => {
+                for item in items {
+                    if let Some(op) = AiDecisionOperation::from_value(item) {
+                        operations.push(op);
+                    }
+                }
+            }
+            Some(value) => {
+                if let Some(op) = AiDecisionOperation::from_value(value) {
+                    operations.push(op);
+                }
+            }
+            None => {}
+        }
+        operations
     }
 }
 
@@ -251,18 +291,27 @@ struct StoredAiDecision {
     #[serde(default)]
     justification: Option<String>,
     #[serde(default)]
-    operation: Option<AiDecisionOperation>,
+    operations: Vec<AiDecisionOperation>,
+    #[serde(default, rename = "operation", skip_serializing)]
+    legacy_operation: Option<AiDecisionOperation>,
 }
 
 impl StoredAiDecision {
     fn into_record(self) -> AiDecisionRecord {
+        let operations = if !self.operations.is_empty() {
+            self.operations
+        } else if let Some(operation) = self.legacy_operation {
+            vec![operation]
+        } else {
+            Vec::new()
+        };
         AiDecisionRecord::from_parts(
             self.timestamp_ms,
             self.system_prompt,
             self.user_prompt,
             self.response,
             self.justification,
-            self.operation,
+            operations,
         )
     }
 }
@@ -275,7 +324,8 @@ impl From<&AiDecisionRecord> for StoredAiDecision {
             user_prompt: value.user_prompt.clone(),
             response: value.response.clone(),
             justification: value.justification.clone(),
-            operation: value.operation.clone(),
+            operations: value.operations.clone(),
+            legacy_operation: None,
         }
     }
 }

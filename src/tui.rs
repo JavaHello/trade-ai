@@ -1904,11 +1904,7 @@ impl TuiApp {
                         "%H:%M:%S",
                         "--:--:--",
                     );
-                    let operation = entry
-                        .operation
-                        .as_ref()
-                        .map(|op| op.brief_label())
-                        .unwrap_or_else(|| "未识别".to_string());
+                    let operation = Self::ai_operation_label(entry);
                     let summary = entry.summary();
                     let row = format_columns(&[
                         (
@@ -1929,6 +1925,20 @@ impl TuiApp {
             .alignment(Alignment::Left)
             .block(block);
         frame.render_widget(paragraph, area);
+    }
+
+    fn ai_operation_label(entry: &AiDecisionRecord) -> String {
+        if entry.operations.is_empty() {
+            return "未识别".to_string();
+        }
+        let mut labels = Vec::new();
+        for op in entry.operations.iter().take(2) {
+            labels.push(op.brief_label());
+        }
+        if entry.operations.len() > 2 {
+            labels.push(format!("+{} 更多", entry.operations.len() - 2));
+        }
+        labels.join(" | ")
     }
 
     fn ai_panel_column_widths(total_width: usize) -> (usize, usize) {
@@ -2414,12 +2424,24 @@ impl TuiApp {
                 .fg(Color::LightBlue)
                 .add_modifier(Modifier::BOLD),
         )));
-        if let Some(operation) = &entry.operation {
-            for line in operation.detail_lines() {
-                lines.push(Line::from(line));
-            }
-        } else {
+        if entry.operations.is_empty() {
             lines.push(Line::from("未解析到决策操作"));
+        } else {
+            for (idx, operation) in entry.operations.iter().enumerate() {
+                if entry.operations.len() > 1 {
+                    lines.push(Line::from(format!(
+                        "操作 {} · {}",
+                        idx + 1,
+                        operation.brief_label()
+                    )));
+                }
+                for line in operation.detail_lines() {
+                    lines.push(Line::from(line));
+                }
+                if idx + 1 < entry.operations.len() {
+                    lines.push(Line::from(""));
+                }
+            }
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(

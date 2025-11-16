@@ -105,21 +105,24 @@ const SYSTEM_PROMPT: &str = r#"
 
 # 输出格式规范
 
-请以**有效的 JSON 对象**的形式返回您的决策，该对象必须包含以下字段：
+请以**有效的 JSON 数组**的形式返回您的决策，该数组的每个元素必须包含以下字段：
 
 ```json
-{
-"signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close",
-"coin": "<string>",
-"quantity": <float>,
-"leverage": <integer 1-20>,
-"profit_target": <float>,
-"stop_loss": <float>,
-"invalidation_condition": "<string>",
-"confidence": <float 0-1>,
-"risk_usd": <float>,
-"justification": "<string>" // 使用中文输出
-}
+[
+  {
+  "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close",
+  "coin": "<string>",
+  "quantity": <float>,
+  "leverage": <integer 1-20>,
+  "profit_target": <float>,
+  "stop_loss": <float>,
+  "invalidation_condition": "<string>",
+  "confidence": <float 0-1>,
+  "risk_usd": <float>,
+  "justification": "<string>" // 使用中文输出
+  },
+  // ... additional positions if any
+]
 ```
 
 ## 输出验证规则
@@ -520,19 +523,22 @@ impl DeepseekReporter {
         let Some(_) = &self.order_tx else {
             return Ok(());
         };
-        let decision = match parse_ai_decision(response) {
-            Ok(payload) => payload,
+        let decisions = match parse_ai_decisions(response) {
+            Ok(payloads) => payloads,
             Err(err) => {
                 return Err(anyhow!("解析 AI 决策失败: {err}"));
             }
         };
-        match decision.signal {
-            DecisionSignal::Hold => Ok(()),
-            DecisionSignal::BuyToEnter | DecisionSignal::SellToEnter => {
-                self.place_entry_order(&decision, analytics).await
-            }
-            DecisionSignal::Close => self.execute_close_signal(&decision, analytics).await,
+        for decision in decisions {
+            match decision.signal {
+                DecisionSignal::Hold => continue,
+                DecisionSignal::BuyToEnter | DecisionSignal::SellToEnter => {
+                    self.place_entry_order(&decision, analytics).await?
+                }
+                DecisionSignal::Close => self.execute_close_signal(&decision, analytics).await?,
+            };
         }
+        Ok(())
     }
 
     async fn place_entry_order(
@@ -833,18 +839,56 @@ fn ai_operator() -> TradeOperator {
     }
 }
 
-fn parse_ai_decision(raw: &str) -> Result<AiDecisionPayload> {
-    match serde_json::from_str::<AiDecisionPayload>(raw) {
-        Ok(payload) => Ok(payload),
+fn parse_ai_decisions(raw: &str) -> Result<Vec<AiDecisionPayload>> {
+    let value = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => value,
         Err(_) => {
-            let start = raw.find('{').ok_or_else(|| anyhow!("缺少 JSON 起始"))?;
-            let end = raw.rfind('}').ok_or_else(|| anyhow!("缺少 JSON 结束"))?;
-            let slice = raw
-                .get(start..=end)
-                .ok_or_else(|| anyhow!("无法截取 AI JSON"))?;
-            serde_json::from_str::<AiDecisionPayload>(slice)
-                .map_err(|err| anyhow!("解析 JSON 失败: {err}"))
+            if let (Some(start), Some(end)) = (raw.find('['), raw.rfind(']')) {
+                if end <= start {
+                    return Err(anyhow!("无法截取 AI JSON"));
+                }
+                let slice = raw
+                    .get(start..=end)
+                    .ok_or_else(|| anyhow!("无法截取 AI JSON"))?;
+                serde_json::from_str::<serde_json::Value>(slice)
+                    .map_err(|err| anyhow!("解析 JSON 失败: {err}"))?
+            } else {
+                let start = raw.find('{').ok_or_else(|| anyhow!("缺少 JSON 起始"))?;
+                let end = raw.rfind('}').ok_or_else(|| anyhow!("缺少 JSON 结束"))?;
+                if end <= start {
+                    return Err(anyhow!("无法截取 AI JSON"));
+                }
+                let slice = raw
+                    .get(start..=end)
+                    .ok_or_else(|| anyhow!("无法截取 AI JSON"))?;
+                serde_json::from_str::<serde_json::Value>(slice)
+                    .map_err(|err| anyhow!("解析 JSON 失败: {err}"))?
+            }
         }
+    };
+    match value {
+        serde_json::Value::Array(items) => {
+            let mut decisions = Vec::new();
+            for (idx, item) in items.into_iter().enumerate() {
+                if item.is_null() {
+                    continue;
+                }
+                let payload = serde_json::from_value::<AiDecisionPayload>(item)
+                    .map_err(|err| anyhow!("解析第 {} 个 AI 决策失败: {err}", idx + 1))?;
+                decisions.push(payload);
+            }
+            if decisions.is_empty() {
+                Err(anyhow!("AI 决策数组为空"))
+            } else {
+                Ok(decisions)
+            }
+        }
+        serde_json::Value::Object(_) => {
+            let payload = serde_json::from_value::<AiDecisionPayload>(value)
+                .map_err(|err| anyhow!("解析 AI 决策失败: {err}"))?;
+            Ok(vec![payload])
+        }
+        _ => Err(anyhow!("AI 决策必须是 JSON 对象或数组")),
     }
 }
 
