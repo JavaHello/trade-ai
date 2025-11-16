@@ -2,12 +2,13 @@
 
 ## 工具简介
 
-`trade-ai` 是一个基于 Rust 的终端可视化工具，负责：
+`trade-ai` 是一个基于 Rust 的终端可视化加密货币交易工具，负责：
 
 - 通过 OKX WebSocket 实时订阅合约 `mark-price`
 - 在 TUI 中绘制价格曲线并展示涨跌幅
-- 监控自定义上下限并通过桌面通知（macOS、Linux）提醒
+- 可选启用 Deepseek AI，周期性读取账户/技术指标并可自动生成交易指令
 - 预加载一定窗口的历史数据，方便刚启动时快速回看走势
+- 将成交明细、AI 决策、错误信息持久化到本地 JSONL 文件，TUI 交易页可随时回看
 - 在交易视图中可直接向 OKX 下单，指令会通过 Tokio channel 发送到 OKX 交易 API
 
 ## 环境要求
@@ -15,6 +16,22 @@
 - 已安装 Rust（建议 `rustup` + stable toolchain）
 - 能访问 OKX API（默认公开接口即可，无需 API Key）
 - 若需要桌面通知：macOS 需开启 `osascript` 权限，Linux 需 `notify-send/xdg-open`
+
+## 运行配置（`config.json`）
+
+程序首次启动会在项目根目录生成 `config.json`，记录运行起点时间和显示所用时区，例如：
+
+```json
+{
+  "start_timestamp_ms": 1763132135841,
+  "timezone": "Asia/Shanghai"
+}
+```
+
+- `start_timestamp_ms`：用于 Deepseek 策略统计与 TUI 中的“运行以来”指标，删除此文件可重新初始化。
+- `timezone`：控制 TUI 中的时间格式，支持 IANA 名称（`Asia/Shanghai`）或 `UTC+08:00`、`UTC-05:00` 等固定偏移。
+
+修改文件后重启程序即可生效；若字段缺失会回落到本地时区。
 
 ## 配置 OKX 交易
 
@@ -30,13 +47,33 @@ cargo run --release -- \
 ```
 
 所有字段也可以通过环境变量 `OKX_API_KEY`、`OKX_API_SECRET`、`OKX_API_PASSPHRASE` 注入。`--okx-td-mode`
-默认为 `cross`，可按需切换为 `isolated` 或 `cash`。一旦配置完成，交易页面的委托将直接发送到 OKX
+默认为 `cross`(目前只支持 `cross`)。一旦配置完成，交易页面的委托将直接发送到 OKX
 实盘/模拟账户（取决于 API 权限），请谨慎操作。
 
 ## Deepseek 智能分析
 
-若同时配置了 OKX API 与 Deepseek API，程序会定期（默认 5 分钟）抓取当前持仓、挂单和各币种资金情况，
-并将快照发送给 Deepseek 生成中文结论，结论会显示在 TUI 底部的状态栏。可以通过环境变量或命令行参数启用：
+在同时提供 OKX 与 Deepseek API 时，`trade-ai` 会按照设定频率（默认 3 分钟）执行以下流程：
+
+1. 抓取账户快照：持仓、挂单、资金、最近成交（来自本地 `trade_logs.jsonl`）。
+2. 采集行情指标：EMA/MACD/RSI/ATR、资金费率、未平仓合约数等（`okx_analytics.rs`）。
+3. 生成上下文并发送给 Deepseek，请求中文结论及结构化 JSON 决策。
+4. 在 TUI 底部展示最近一条摘要，并在交易页 `AI` 面板里保留完整记录。
+
+当 Deepseek 返回有效的 JSON 信号时，程序会做安全检查：验证交易对、数量粒度、止盈/止损方向等，然后通过内置
+OKX 客户端执行下列动作：
+
+- **建仓**：按最新 `mark-price` 生成限价单，可附带杠杆与标签。
+- **保护单**：当决策提供目标价/止损价时，会自动派发止盈、止损单。
+- **平仓**：若信号为 `close`，会按持仓方向发送减仓单。
+- **杠杆同步**：若要求的杠杆与当前不符，会先发送 `SetLeverage`。
+
+所有 AI 请求/响应会写入 `ai_decisions.jsonl`，TUI 启动时会加载最近 512 条方便排查。
+若未提供 OKX API（即没有交易令牌），Deepseek 仍会给出文字分析，但不会触发任何下单操作。
+
+> ⚠️ Deepseek 具备实盘下单能力。请确认 API 权限、交易模式（实盘/模拟）和杠杆限制，必要时在 OKX 侧设置更细的
+> 风控（子账户、资金限额）后再开启。
+
+可以通过环境变量或命令行参数启用：
 
 ```bash
 cargo run --release -- \
@@ -83,12 +120,19 @@ cargo run --release -- \
 
 ## 通知机制
 
-- 超出阈值时会广播 `Notify` 指令，由 `notify.rs` 调用桌面通知
-- macOS 使用 `osascript`，Linux 使用 `notify-rust` 并在点击时尝试打开对应交易对页面
+- 超出阈值时会广播 `Notify` 指令，由 `notify.rs` 处理
 - 为避免刷屏，通知间隔默认 10 秒
+
+## 日志与数据持久化
+
+- `trade_logs.jsonl`：每次委托/撤单/成交都会记录一行 JSON，TUI 交易页的“成交日志”即来自此文件（最多加载 512 条）。
+- `ai_decisions.jsonl`：保存 Deepseek 系统提示、用户上下文、原始 JSON 响应及推断的操作结论。
+- `error_logs.jsonl`：所有 `Command::Error` 信息都会落盘，方便后台运行时查因。
+
+删除这些文件不会影响其他状态，但会丢失历史记录。
 
 ## 常见问题
 
 - **没有画面**：终端需支持 ANSI，推荐 24 bit 色彩的终端模拟器
 - **历史数据为空**：OKX K 线接口有速率限制，可稍等自动退避重试
-- **通知无效**：确认系统通知权限、命令是否存在（例如 Linux 需要 `notify-send`、`xdg-open`）
+- **通知无效**：确认终端支持 `OSC 777`协议

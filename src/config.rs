@@ -71,11 +71,11 @@ pub struct CliParams {
     )]
     pub deepseek_endpoint: String,
 
-    /// Interval between Deepseek summaries (e.g., 5m, 15m, 1h)
+    /// Interval between Deepseek summaries (e.g., 3m, 15m, 1h)
     #[clap(
         long = "deepseek-interval",
         value_name = "DURATION",
-        default_value = "5m"
+        default_value = "3m"
     )]
     pub deepseek_interval: DurationSpec,
 }
