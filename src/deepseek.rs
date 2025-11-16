@@ -1292,7 +1292,7 @@ fn append_market_analytics(buffer: &mut String, analytics: &[InstrumentAnalytics
             optional_float(entry.oi_average)
         ));
         buffer.push_str(&format!(
-            "- 融资利率：{}\n",
+            "- 资金费率：{}\n",
             optional_float(entry.funding_rate)
         ));
         buffer.push_str("**日内走势（3分钟间隔，最早→最新）：**\n");

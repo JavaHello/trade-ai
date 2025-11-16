@@ -157,7 +157,7 @@ impl MarketDataFetcher {
         Ok(candles)
     }
 
-    async fn fetch_funding_rate(&self, inst_id: &str) -> Result<Option<f64>> {
+    pub async fn fetch_funding_rate(&self, inst_id: &str) -> Result<Option<f64>> {
         let response: FundingRateResponse = self
             .http
             .get(FUNDING_RATE_ENDPOINT)
@@ -316,7 +316,6 @@ struct OpenInterestHistoryResponse {
     msg: String,
     data: Vec<Vec<String>>,
 }
-
 
 fn take_tail(values: &[f64], count: usize) -> Vec<f64> {
     if count == 0 || values.is_empty() {
