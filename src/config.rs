@@ -6,7 +6,8 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, Result as AnyResult, anyhow};
-use chrono::Local;
+use chrono::{FixedOffset, Local, TimeZone, Utc};
+use chrono_tz::Tz;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -262,42 +263,168 @@ fn normalize_endpoint(value: &str) -> String {
     }
 }
 
+const DEFAULT_TIMEZONE_LABEL: &str = "Asia/Shanghai";
+
+#[derive(Clone, Copy, Debug)]
+pub enum ConfiguredTimeZone {
+    Local,
+    Named(Tz),
+    Fixed(FixedOffset),
+}
+
+impl ConfiguredTimeZone {
+    pub fn format_timestamp(&self, timestamp_ms: i64, fmt: &str) -> Option<String> {
+        let seconds = timestamp_ms.div_euclid(1000);
+        let millis = timestamp_ms.rem_euclid(1000);
+        let nanos = (millis as u32) * 1_000_000;
+        let base = Utc.timestamp_opt(seconds, nanos).single()?;
+        Some(self.apply_timezone(base).format(fmt).to_string())
+    }
+
+    fn apply_timezone<TzSrc: TimeZone>(
+        &self,
+        datetime: chrono::DateTime<TzSrc>,
+    ) -> chrono::DateTime<FixedOffset> {
+        match self {
+            ConfiguredTimeZone::Local => {
+                let localized = datetime.with_timezone(&Local);
+                localized.fixed_offset()
+            }
+            ConfiguredTimeZone::Named(tz) => {
+                let localized = datetime.with_timezone(tz);
+                localized.fixed_offset()
+            }
+            ConfiguredTimeZone::Fixed(offset) => datetime.with_timezone(offset),
+        }
+    }
+}
+
+fn parse_timezone_label(label: Option<String>) -> AnyResult<ConfiguredTimeZone> {
+    let provided = label.unwrap_or_else(|| "local".to_string());
+    let trimmed = provided.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("local") {
+        return Ok(ConfiguredTimeZone::Local);
+    }
+    if let Ok(tz) = trimmed.parse::<Tz>() {
+        return Ok(ConfiguredTimeZone::Named(tz));
+    }
+    if let Some(offset) = try_parse_fixed_offset(trimmed) {
+        return Ok(ConfiguredTimeZone::Fixed(offset));
+    }
+    Err(anyhow!(
+        "无法解析时区 `{}`，请使用 IANA 时区名称（如 Asia/Shanghai）或 UTC±HH:MM 形式",
+        trimmed
+    ))
+}
+
+fn try_parse_fixed_offset(input: &str) -> Option<FixedOffset> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.eq_ignore_ascii_case("z")
+        || trimmed.eq_ignore_ascii_case("utc")
+        || trimmed.eq_ignore_ascii_case("gmt")
+    {
+        return FixedOffset::east_opt(0);
+    }
+    let normalized = if trimmed.len() >= 3 && trimmed[..3].eq_ignore_ascii_case("utc") {
+        trimmed[3..].trim()
+    } else if trimmed.len() >= 3 && trimmed[..3].eq_ignore_ascii_case("gmt") {
+        trimmed[3..].trim()
+    } else {
+        trimmed
+    };
+    if normalized.is_empty() {
+        return FixedOffset::east_opt(0);
+    }
+    let bytes = normalized.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let (sign, rest) = match bytes[0] {
+        b'+' => (1, &normalized[1..]),
+        b'-' => (-1, &normalized[1..]),
+        value if (value as char).is_ascii_digit() => (1, normalized),
+        _ => return None,
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let (hour_part, minute_part) = if let Some(idx) = rest.find(':') {
+        let hour = rest[..idx].trim();
+        let minute = rest[idx + 1..].trim();
+        (hour, minute)
+    } else if rest.len() == 4 {
+        (&rest[..2], &rest[2..])
+    } else {
+        (rest, "0")
+    };
+    if hour_part.is_empty() {
+        return None;
+    }
+    let hours: i32 = hour_part.parse().ok()?;
+    let minutes: i32 = if minute_part.is_empty() {
+        0
+    } else {
+        minute_part.parse().ok()?
+    };
+    if minutes >= 60 {
+        return None;
+    }
+    let seconds = hours
+        .checked_mul(3600)?
+        .checked_add(minutes * 60)?
+        .checked_mul(sign)?;
+    FixedOffset::east_opt(seconds)
+}
+
 #[derive(Debug, Clone)]
 pub struct AppRunConfig {
     start_timestamp_ms: i64,
+    timezone: ConfiguredTimeZone,
 }
 
 impl AppRunConfig {
     pub fn load_or_init(path: impl AsRef<Path>) -> AnyResult<Self> {
         let path = path.as_ref();
-        let start_timestamp_ms = match fs::read_to_string(path) {
-            Ok(contents) => {
-                serde_json::from_str::<StoredAppRunConfig>(&contents)
-                    .with_context(|| format!("解析 {} 失败", path.display()))?
-                    .start_timestamp_ms
-            }
+        let stored = match fs::read_to_string(path) {
+            Ok(contents) => serde_json::from_str::<StoredAppRunConfig>(&contents)
+                .with_context(|| format!("解析 {} 失败", path.display()))?,
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 let now_ms = Local::now().timestamp_millis();
                 let stored = StoredAppRunConfig {
                     start_timestamp_ms: now_ms,
+                    timezone: Some(DEFAULT_TIMEZONE_LABEL.to_string()),
                 };
                 let payload = serde_json::to_string_pretty(&stored)?;
                 fs::write(path, payload).with_context(|| format!("无法写入 {}", path.display()))?;
-                now_ms
+                stored
             }
             Err(err) => {
                 return Err(anyhow!("读取 {} 失败: {}", path.display(), err));
             }
         };
-        Ok(AppRunConfig { start_timestamp_ms })
+        let timezone = parse_timezone_label(stored.timezone.clone())?;
+        Ok(AppRunConfig {
+            start_timestamp_ms: stored.start_timestamp_ms,
+            timezone,
+        })
     }
 
     pub fn start_timestamp_ms(&self) -> i64 {
         self.start_timestamp_ms
+    }
+
+    pub fn timezone(&self) -> ConfiguredTimeZone {
+        self.timezone
     }
 }
 
 #[derive(Serialize, Deserialize)]
 struct StoredAppRunConfig {
     start_timestamp_ms: i64,
+    #[serde(default)]
+    timezone: Option<String>,
 }

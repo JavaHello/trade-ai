@@ -46,7 +46,7 @@ impl TradeLogEntry {
         }
     }
 
-    fn timestamp_ms(&self) -> i64 {
+    pub fn timestamp_ms(&self) -> i64 {
         self.timestamp.timestamp_millis()
     }
 }

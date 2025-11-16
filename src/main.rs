@@ -32,6 +32,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let param = config::CliParams::parse();
     let run_config = config::AppRunConfig::load_or_init("config.json")?;
     let run_start_timestamp_ms = run_config.start_timestamp_ms();
+    let timezone = run_config.timezone();
     let deepseek_cfg = param.deepseek_config();
     let (tx, mut rx) = broadcast::channel::<Command>(16);
     {
@@ -219,6 +220,7 @@ async fn main() -> Result<(), anyhow::Error> {
         order_tx.clone(),
         deepseek_cfg.is_some(),
         trading_cfg.is_some(),
+        timezone,
     );
     app.preload_trade_logs();
     app.preload_ai_insights();

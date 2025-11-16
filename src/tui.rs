@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::Result as AnyResult;
-use chrono::{Local, TimeZone};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -24,6 +23,7 @@ use crate::command::{
     PendingOrderInfo, PositionInfo, PricePoint, SetLeverageRequest, TradeEvent, TradeOperator,
     TradeOrderKind, TradeRequest, TradeSide, TradingCommand,
 };
+use crate::config::ConfiguredTimeZone;
 use crate::okx::MarketInfo;
 use crate::trade_log::{TradeLogEntry, TradeLogStore};
 
@@ -953,6 +953,7 @@ pub struct TuiApp {
     trade: TradeState,
     exit_confirmation: bool,
     loading_overlay: Option<LoadingOverlay>,
+    timezone: ConfiguredTimeZone,
 }
 impl TuiApp {
     fn is_exit_key(key: &KeyEvent) -> bool {
@@ -969,6 +970,7 @@ impl TuiApp {
         order_tx: Option<mpsc::Sender<TradingCommand>>,
         ai_enabled: bool,
         wait_for_markets: bool,
+        timezone: ConfiguredTimeZone,
     ) -> TuiApp {
         let min_redraw_gap = Duration::from_millis(100);
         let inst_ids = if inst_ids.is_empty() {
@@ -1014,6 +1016,7 @@ impl TuiApp {
             trade: TradeState::new(order_tx, Some(log_store), ai_store, markets, ai_enabled),
             exit_confirmation: false,
             loading_overlay,
+            timezone,
         }
     }
 
@@ -1503,7 +1506,7 @@ impl TuiApp {
                     .map(Self::format_pnl_ratio)
                     .unwrap_or_else(|| "--".to_string());
                 let ordinal_label = format!("{}", idx + 1);
-                let time_label = Self::snapshot_time_label(position.create_time);
+                let time_label = self.snapshot_time_label(position.create_time);
                 let row = format_columns(&[
                     (ordinal_label.as_str(), ColumnAlign::Right, 4),
                     (time_label.as_str(), ColumnAlign::Left, 10),
@@ -1623,7 +1626,7 @@ impl TuiApp {
                 let ord_label = Self::short_order_id(&order.ord_id);
                 let lever_label = Self::leverage_label(order.lever);
                 let ordinal_label = format!("{}", idx + 1);
-                let time_label = Self::snapshot_time_label(order.create_time);
+                let time_label = self.snapshot_time_label(order.create_time);
                 let row = format_columns(&[
                     (ordinal_label.as_str(), ColumnAlign::Right, 4),
                     (time_label.as_str(), ColumnAlign::Left, 10),
@@ -1896,7 +1899,11 @@ impl TuiApp {
                 if let Some(entry) = self.trade.ai_insights.get(idx) {
                     let ordinal = idx + 1;
                     let ordinal_label = ordinal.to_string();
-                    let time_label = entry.timestamp.format("%H:%M:%S").to_string();
+                    let time_label = self.format_timestamp_or_default(
+                        entry.timestamp_ms(),
+                        "%H:%M:%S",
+                        "--:--:--",
+                    );
                     let operation = entry
                         .operation
                         .as_ref()
@@ -1987,7 +1994,7 @@ impl TuiApp {
         entry: &TradeLogEntry,
         ordinal: usize,
     ) -> Vec<(String, ColumnAlign, usize, Option<Color>)> {
-        let time = entry.timestamp.format("%H:%M:%S").to_string();
+        let time = self.format_timestamp_or_default(entry.timestamp_ms(), "%H:%M:%S", "--:--:--");
         let leverage_label = Self::leverage_label(entry.leverage);
         let ordinal_label = ordinal.to_string();
         match &entry.event {
@@ -2384,7 +2391,8 @@ impl TuiApp {
         let left = area.x + (area.width.saturating_sub(popup_width)) / 2;
         let top = area.y + (area.height.saturating_sub(popup_height)) / 2;
         let popup = Rect::new(left, top, popup_width, popup_height);
-        let timestamp = entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
+        let timestamp =
+            self.format_timestamp_or_default(entry.timestamp_ms(), "%Y-%m-%d %H:%M:%S", "--");
         let mut lines = vec![Line::from(format!("时间 {timestamp}"))];
         lines.push(Line::from(Span::styled(
             "[User Snapshot]",
@@ -2477,7 +2485,8 @@ impl TuiApp {
         let left = area.x + (area.width.saturating_sub(popup_width)) / 2;
         let top = area.y + (area.height.saturating_sub(popup_height)) / 2;
         let popup = Rect::new(left, top, popup_width, popup_height);
-        let timestamp = entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
+        let timestamp =
+            self.format_timestamp_or_default(entry.timestamp_ms(), "%Y-%m-%d %H:%M:%S", "--");
         let mut lines = vec![Line::from(format!("时间 {timestamp}"))];
         let (title, status_success, message) = match &entry.event {
             TradeEvent::Order(response) => {
@@ -2657,12 +2666,12 @@ impl TuiApp {
         let x_mid = f64::midpoint(self.window[0], self.window[1]);
         let x_labels = vec![
             Span::styled(
-                Self::format_timestamp_label(self.window[0]),
+                self.format_timestamp_label(self.window[0]),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::raw(Self::format_timestamp_label(x_mid)),
+            Span::raw(self.format_timestamp_label(x_mid)),
             Span::styled(
-                Self::format_timestamp_label(self.window[1]),
+                self.format_timestamp_label(self.window[1]),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
         ];
@@ -3818,25 +3827,37 @@ impl TuiApp {
         Ok(false)
     }
 
-    fn snapshot_time_label(timestamp: Option<i64>) -> String {
-        timestamp
-            .and_then(|ts| Local.timestamp_millis_opt(ts).single())
-            .map(|dt| dt.format("%H:%M:%S").to_string())
-            .unwrap_or_else(|| "--:--:--".to_string())
+    fn snapshot_time_label(&self, timestamp: Option<i64>) -> String {
+        self.format_optional_timestamp(timestamp, "%H:%M:%S", "--:--:--")
     }
 
-    fn format_timestamp_label(ts_ms: f64) -> String {
-        let rounded = ts_ms.round() as i64;
-        if rounded <= 0 {
+    fn format_timestamp_label(&self, ts_ms: f64) -> String {
+        if !ts_ms.is_finite() {
             return "--:--:--".to_string();
         }
-        let secs = rounded / 1000;
-        let nanos = ((rounded % 1000).abs() as u32) * 1_000_000;
-        Local
-            .timestamp_opt(secs, nanos)
-            .single()
-            .map(|dt| dt.format("%H:%M:%S").to_string())
-            .unwrap_or_else(|| "--:--:--".to_string())
+        let rounded = ts_ms.round() as i64;
+        self.format_timestamp_or_default(rounded, "%H:%M:%S", "--:--:--")
+    }
+
+    fn format_optional_timestamp(
+        &self,
+        timestamp: Option<i64>,
+        fmt: &str,
+        fallback: &str,
+    ) -> String {
+        timestamp
+            .filter(|ts| *ts > 0)
+            .and_then(|ts| self.timezone.format_timestamp(ts, fmt))
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
+    fn format_timestamp_or_default(&self, timestamp_ms: i64, fmt: &str, fallback: &str) -> String {
+        if timestamp_ms <= 0 {
+            return fallback.to_string();
+        }
+        self.timezone
+            .format_timestamp(timestamp_ms, fmt)
+            .unwrap_or_else(|| fallback.to_string())
     }
 
     fn price_precision(&self) -> usize {
