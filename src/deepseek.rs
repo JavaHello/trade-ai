@@ -5,12 +5,13 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration as ChronoDuration, Local, TimeZone};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::time::{self, MissedTickBehavior};
 
 use crate::command::{
     AccountBalanceDelta, AccountSnapshot, AiInsightRecord, Command, PendingOrderInfo, PositionInfo,
-    TradeEvent, TradeOperator, TradeOrderKind, TradeRequest, TradeSide, TradingCommand,
+    SetLeverageRequest, TradeEvent, TradeOperator, TradeOrderKind, TradeRequest, TradeSide,
+    TradingCommand,
 };
 use crate::config::DeepseekConfig;
 use crate::okx::{MarketInfo, SharedAccountState};
@@ -156,6 +157,7 @@ const AI_TAG_ENTRY: &str = "dsentry";
 const AI_TAG_STOP_LOSS: &str = "dssl";
 const AI_TAG_TAKE_PROFIT: &str = "dstp";
 const AI_TAG_CLOSE: &str = "dsclose";
+const LEVERAGE_EPSILON: f64 = 1e-6;
 
 pub struct DeepseekReporter {
     client: DeepseekClient,
@@ -164,6 +166,7 @@ pub struct DeepseekReporter {
     interval: Duration,
     inst_ids: Vec<String>,
     markets: HashMap<String, MarketInfo>,
+    leverage_cache: RwLock<HashMap<LeverageKey, f64>>,
     market: MarketDataFetcher,
     performance: PerformanceTracker,
     order_tx: Option<mpsc::Sender<TradingCommand>>,
@@ -183,6 +186,7 @@ impl DeepseekReporter {
         let market = MarketDataFetcher::new()?;
         let inst_ids = normalize_inst_ids(inst_ids);
         let performance = PerformanceTracker::new(start_timestamp_ms);
+        let leverage_cache = RwLock::new(initial_leverage_cache(&markets));
         Ok(DeepseekReporter {
             client,
             state,
@@ -190,6 +194,7 @@ impl DeepseekReporter {
             interval: config.interval,
             inst_ids,
             markets,
+            leverage_cache,
             market,
             performance,
             order_tx,
@@ -220,6 +225,8 @@ impl DeepseekReporter {
         if !has_material_data(&snapshot) {
             return Ok(());
         }
+        self.capture_leverage_from_snapshot(&snapshot).await;
+        let leverage_overview = self.leverage_overview().await;
         let analytics = self.collect_market_analytics().await;
         let performance = match self.performance.summary(self.interval) {
             Ok(summary) => {
@@ -242,6 +249,7 @@ impl DeepseekReporter {
             performance.as_ref(),
             &self.inst_ids,
             &self.markets,
+            &leverage_overview,
         );
         let insight = self.client.chat_completion(&prompt).await?;
         let trimmed = insight.trim();
@@ -280,6 +288,110 @@ impl DeepseekReporter {
             }
         }
         analytics
+    }
+
+    async fn capture_leverage_from_snapshot(&self, snapshot: &AccountSnapshot) {
+        if snapshot.positions.is_empty() && snapshot.open_orders.is_empty() {
+            return;
+        }
+        let mut cache = self.leverage_cache.write().await;
+        for position in &snapshot.positions {
+            if let Some(value) = position.lever {
+                apply_leverage_entry(
+                    &mut cache,
+                    &position.inst_id,
+                    position.pos_side.as_deref(),
+                    value,
+                );
+            }
+        }
+        for order in &snapshot.open_orders {
+            if let Some(value) = order.lever {
+                apply_leverage_entry(&mut cache, &order.inst_id, order.pos_side.as_deref(), value);
+            }
+        }
+    }
+
+    async fn leverage_overview(&self) -> Vec<InstrumentLeverage> {
+        let mut overview: HashMap<String, InstrumentLeverage> = HashMap::new();
+        for inst in &self.inst_ids {
+            overview
+                .entry(inst.clone())
+                .or_insert_with(|| InstrumentLeverage::new(inst.clone()));
+        }
+        {
+            let cache = self.leverage_cache.read().await;
+            for (key, value) in cache.iter() {
+                let entry = overview
+                    .entry(key.inst_id.clone())
+                    .or_insert_with(|| InstrumentLeverage::new(key.inst_id.clone()));
+                match key.pos_side.as_deref() {
+                    Some(side) if side.eq_ignore_ascii_case("long") => entry.long = Some(*value),
+                    Some(side) if side.eq_ignore_ascii_case("short") => entry.short = Some(*value),
+                    Some(side) if side.eq_ignore_ascii_case("net") => entry.net = Some(*value),
+                    _ => entry.net = Some(*value),
+                }
+            }
+        }
+        let mut entries: Vec<_> = overview.into_values().collect();
+        entries.sort_by(|a, b| a.inst_id.cmp(&b.inst_id));
+        entries
+    }
+
+    async fn ensure_leverage_alignment(
+        &self,
+        inst_id: &str,
+        pos_side: Option<String>,
+        desired: f64,
+    ) -> Result<()> {
+        if desired <= 0.0 {
+            return Ok(());
+        }
+        let Some(order_tx) = &self.order_tx else {
+            return Ok(());
+        };
+        let current = self.lookup_leverage(inst_id, pos_side.as_deref()).await;
+        let needs_update = match current {
+            Some(value) => (value - desired).abs() > LEVERAGE_EPSILON,
+            None => true,
+        };
+        if !needs_update {
+            return Ok(());
+        }
+        let request = SetLeverageRequest {
+            inst_id: inst_id.to_string(),
+            lever: desired,
+            pos_side: pos_side.clone(),
+        };
+        order_tx
+            .send(TradingCommand::SetLeverage(request))
+            .await
+            .map_err(|err| anyhow!("发送杠杆调整命令失败: {err}"))?;
+        self.record_leverage(inst_id, pos_side.as_deref(), desired)
+            .await;
+        Ok(())
+    }
+
+    async fn lookup_leverage(&self, inst_id: &str, pos_side: Option<&str>) -> Option<f64> {
+        let cache = self.leverage_cache.read().await;
+        let key = LeverageKey::new(inst_id, pos_side);
+        if let Some(value) = cache.get(&key) {
+            return Some(*value);
+        }
+        if pos_side.is_some() {
+            let fallback = LeverageKey::new(inst_id, None);
+            cache.get(&fallback).copied()
+        } else {
+            None
+        }
+    }
+
+    async fn record_leverage(&self, inst_id: &str, pos_side: Option<&str>, value: f64) {
+        if !value.is_finite() || value <= 0.0 {
+            return;
+        }
+        let mut cache = self.leverage_cache.write().await;
+        apply_leverage_entry(&mut cache, inst_id, pos_side, value);
     }
 
     async fn execute_ai_decision(
@@ -347,6 +459,11 @@ impl DeepseekReporter {
             },
             kind: TradeOrderKind::Regular,
         };
+        if let Some(target_leverage) = request.leverage {
+            let pos_side = determine_entry_pos_side(&request.inst_id, request.side);
+            self.ensure_leverage_alignment(&request.inst_id, pos_side, target_leverage)
+                .await?;
+        }
         self.submit_trade_request(request.clone()).await?;
         self.place_protective_orders(&request, price, decision)
             .await
@@ -677,6 +794,25 @@ struct InstrumentAnalytics {
 }
 
 #[derive(Debug, Clone, Default)]
+struct InstrumentLeverage {
+    inst_id: String,
+    net: Option<f64>,
+    long: Option<f64>,
+    short: Option<f64>,
+}
+
+impl InstrumentLeverage {
+    fn new(inst_id: String) -> Self {
+        InstrumentLeverage {
+            inst_id,
+            net: None,
+            long: None,
+            short: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 struct OpenInterestStats {
     latest: Option<f64>,
     average: Option<f64>,
@@ -775,6 +911,24 @@ impl PerformanceTracker {
             sharpe_ratio,
             total_pnl,
         })
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct LeverageKey {
+    inst_id: String,
+    pos_side: Option<String>,
+}
+
+impl LeverageKey {
+    fn new(inst_id: &str, pos_side: Option<&str>) -> Self {
+        let normalized_side = pos_side
+            .map(|side| side.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        LeverageKey {
+            inst_id: inst_id.to_ascii_uppercase(),
+            pos_side: normalized_side,
+        }
     }
 }
 
@@ -1059,6 +1213,7 @@ fn build_snapshot_prompt(
     performance: Option<&PerformanceSummary>,
     inst_ids: &[String],
     markets: &HashMap<String, MarketInfo>,
+    leverages: &[InstrumentLeverage],
 ) -> String {
     let mut buffer = String::new();
     buffer.push_str("以下为 OKX 账户的实时快照，请据此输出风险与操作建议：\n\n");
@@ -1133,9 +1288,30 @@ fn build_snapshot_prompt(
     }
 
     append_trade_limits(&mut buffer, inst_ids, markets, analytics);
+    append_leverage_settings(&mut buffer, leverages);
     append_market_analytics(&mut buffer, analytics);
 
     buffer
+}
+
+fn initial_leverage_cache(markets: &HashMap<String, MarketInfo>) -> HashMap<LeverageKey, f64> {
+    let mut cache = HashMap::new();
+    for (inst_id, market) in markets {
+        apply_leverage_entry(&mut cache, inst_id, None, market.lever);
+    }
+    cache
+}
+
+fn apply_leverage_entry(
+    cache: &mut HashMap<LeverageKey, f64>,
+    inst_id: &str,
+    pos_side: Option<&str>,
+    value: f64,
+) {
+    if !value.is_finite() || value <= 0.0 {
+        return;
+    }
+    cache.insert(LeverageKey::new(inst_id, pos_side), value);
 }
 
 fn append_trade_limits(
@@ -1166,6 +1342,36 @@ fn append_trade_limits(
         buffer.push_str("- ");
         buffer.push_str(&format_trade_limit(inst_id, market, price));
         buffer.push('\n');
+    }
+}
+
+fn append_leverage_settings(buffer: &mut String, leverages: &[InstrumentLeverage]) {
+    if leverages.is_empty() {
+        return;
+    }
+    buffer.push_str("\n【杠杆设置】\n");
+    for entry in leverages {
+        buffer.push_str("- ");
+        buffer.push_str(&format_leverage_entry(entry));
+        buffer.push('\n');
+    }
+}
+
+fn format_leverage_entry(entry: &InstrumentLeverage) -> String {
+    let mut parts = Vec::new();
+    if let Some(default) = entry.net {
+        parts.push(format!("默认 {}x", format_float(default)));
+    }
+    if let Some(long) = entry.long {
+        parts.push(format!("多头 {}x", format_float(long)));
+    }
+    if let Some(short) = entry.short {
+        parts.push(format!("空头 {}x", format_float(short)));
+    }
+    if parts.is_empty() {
+        format!("{}: 杠杆未知", entry.inst_id)
+    } else {
+        format!("{}: {}", entry.inst_id, parts.join(" / "))
     }
 }
 
