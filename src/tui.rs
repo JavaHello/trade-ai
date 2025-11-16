@@ -43,6 +43,8 @@ const MAX_POSITION_RECORDS: usize = 100;
 const MAX_ORDER_RECORDS: usize = 100;
 const MAX_AI_INSIGHTS: usize = 64;
 const LEVERAGE_EPSILON: f64 = 1e-6;
+const AI_INDEX_COLUMN_WIDTH: usize = 5;
+const AI_TIME_COLUMN_WIDTH: usize = 8;
 
 #[derive(Clone, Debug)]
 struct AxisInfo {
@@ -1740,10 +1742,17 @@ impl TuiApp {
         } else if self.trade.ai_insight_count() == 0 {
             lines.push(Line::from("等待 Deepseek 决策 · 按 o 查看原始提示"));
         } else {
-            let total_width = usize::from(area.width.saturating_sub(10).max(8));
+            let fixed_columns = AI_INDEX_COLUMN_WIDTH + AI_TIME_COLUMN_WIDTH;
+            let spacing = 3; // four columns -> three gaps
+            let total_width = usize::from(
+                area.width
+                    .saturating_sub((fixed_columns + spacing) as u16)
+                    .max(8),
+            );
             let (operation_width, summary_width) = Self::ai_panel_column_widths(total_width);
             lines.push(Line::from(format_columns(&[
-                ("时间", ColumnAlign::Left, 8),
+                ("序号", ColumnAlign::Right, AI_INDEX_COLUMN_WIDTH),
+                ("时间", ColumnAlign::Left, AI_TIME_COLUMN_WIDTH),
                 ("操作", ColumnAlign::Left, operation_width),
                 ("摘要", ColumnAlign::Left, summary_width),
             ])));
@@ -1752,6 +1761,8 @@ impl TuiApp {
             let (start, end) = visible_range(len, list_visible, selected);
             for idx in start..end {
                 if let Some(entry) = self.trade.ai_insights.get(idx) {
+                    let ordinal = idx + 1;
+                    let ordinal_label = ordinal.to_string();
                     let time_label = entry.timestamp.format("%H:%M:%S").to_string();
                     let operation = entry
                         .operation
@@ -1760,7 +1771,12 @@ impl TuiApp {
                         .unwrap_or_else(|| "未识别".to_string());
                     let summary = entry.summary();
                     let row = format_columns(&[
-                        (time_label.as_str(), ColumnAlign::Left, 8),
+                        (
+                            ordinal_label.as_str(),
+                            ColumnAlign::Right,
+                            AI_INDEX_COLUMN_WIDTH,
+                        ),
+                        (time_label.as_str(), ColumnAlign::Left, AI_TIME_COLUMN_WIDTH),
                         (operation.as_str(), ColumnAlign::Left, operation_width),
                         (summary.as_str(), ColumnAlign::Left, summary_width),
                     ]);
