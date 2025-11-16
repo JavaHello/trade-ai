@@ -6,6 +6,7 @@ mod error_log;
 mod monitor;
 mod notify;
 mod okx;
+mod okx_analytics;
 mod trade_log;
 mod tui;
 

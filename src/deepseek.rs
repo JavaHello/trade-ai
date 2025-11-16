@@ -15,6 +15,7 @@ use crate::command::{
 };
 use crate::config::DeepseekConfig;
 use crate::okx::{MarketInfo, SharedAccountState};
+use crate::okx_analytics::{InstrumentAnalytics, MarketDataFetcher};
 use crate::trade_log::{TradeLogEntry, TradeLogStore};
 
 const SYSTEM_PROMPT: &str = r#"
@@ -131,24 +132,7 @@ const SYSTEM_PROMPT: &str = r#"
 这是法律管辖范围内的一项研究实验。
 注重技术分析和风险管理原则。
 "#;
-const MARKET_CANDLES_ENDPOINT: &str = "https://www.okx.com/api/v5/market/candles";
-const FUNDING_RATE_ENDPOINT: &str = "https://www.okx.com/api/v5/public/funding-rate";
-const OPEN_INTEREST_ENDPOINT: &str = "https://www.okx.com/api/v5/public/open-interest";
-const OPEN_INTEREST_HISTORY_ENDPOINT: &str =
-    "https://www.okx.com/api/v5/public/open-interest-history";
 const MAX_ANALYTICS_INSTRUMENTS: usize = 3;
-const ANALYTICS_INTRADAY_LIMIT: usize = 160;
-const ANALYTICS_SWING_LIMIT: usize = 120;
-const ANALYTICS_SERIES_TAIL: usize = 8;
-const EMA_SHORT_PERIOD: usize = 20;
-const EMA_LONG_PERIOD: usize = 50;
-const RSI_SHORT_PERIOD: usize = 7;
-const RSI_LONG_PERIOD: usize = 14;
-const MACD_FAST_PERIOD: usize = 12;
-const MACD_SLOW_PERIOD: usize = 26;
-const ATR_FAST_PERIOD: usize = 3;
-const ATR_SLOW_PERIOD: usize = 14;
-const VOLUME_AVG_PERIOD: usize = 20;
 const MAX_POSITIONS: usize = 12;
 const MAX_ORDERS: usize = 12;
 const MAX_BALANCES: usize = 12;
@@ -768,32 +752,6 @@ enum DecisionSignal {
 }
 
 #[derive(Debug, Clone, Default)]
-struct InstrumentAnalytics {
-    inst_id: String,
-    symbol: String,
-    current_price: Option<f64>,
-    current_ema20: Option<f64>,
-    current_macd: Option<f64>,
-    current_rsi7: Option<f64>,
-    oi_latest: Option<f64>,
-    oi_average: Option<f64>,
-    funding_rate: Option<f64>,
-    intraday_prices: Vec<f64>,
-    intraday_ema20: Vec<f64>,
-    intraday_macd: Vec<f64>,
-    intraday_rsi7: Vec<f64>,
-    intraday_rsi14: Vec<f64>,
-    swing_ema20: Option<f64>,
-    swing_ema50: Option<f64>,
-    swing_atr3: Option<f64>,
-    swing_atr14: Option<f64>,
-    swing_volume_current: Option<f64>,
-    swing_volume_avg: Option<f64>,
-    swing_macd: Vec<f64>,
-    swing_rsi14: Vec<f64>,
-}
-
-#[derive(Debug, Clone, Default)]
 struct InstrumentLeverage {
     inst_id: String,
     net: Option<f64>,
@@ -810,12 +768,6 @@ impl InstrumentLeverage {
             short: None,
         }
     }
-}
-
-#[derive(Debug, Clone, Default)]
-struct OpenInterestStats {
-    latest: Option<f64>,
-    average: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -930,281 +882,6 @@ impl LeverageKey {
             pos_side: normalized_side,
         }
     }
-}
-
-struct MarketDataFetcher {
-    http: Client,
-}
-
-impl MarketDataFetcher {
-    fn new() -> Result<Self> {
-        let http = Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .read_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(20))
-            .build()?;
-        Ok(MarketDataFetcher { http })
-    }
-
-    async fn fetch_inst(&self, inst_id: &str) -> Result<InstrumentAnalytics> {
-        let intraday = self
-            .fetch_candles(inst_id, "3m", ANALYTICS_INTRADAY_LIMIT)
-            .await?;
-        if intraday.is_empty() {
-            return Err(anyhow!("{} 缺少 3 分钟 K 线数据", inst_id));
-        }
-        let swing = self
-            .fetch_candles(inst_id, "4H", ANALYTICS_SWING_LIMIT)
-            .await
-            .unwrap_or_default();
-        let closes_intraday: Vec<f64> = intraday.iter().map(|c| c.close).collect();
-        let closes_swing: Vec<f64> = swing.iter().map(|c| c.close).collect();
-        let swing_volumes: Vec<f64> = swing.iter().map(|c| c.volume).collect();
-        let ema20_intraday = compute_ema(&closes_intraday, EMA_SHORT_PERIOD);
-        let macd_intraday = compute_macd(&closes_intraday);
-        let rsi7_intraday = compute_rsi(&closes_intraday, RSI_SHORT_PERIOD);
-        let rsi14_intraday = compute_rsi(&closes_intraday, RSI_LONG_PERIOD);
-        let ema20_swing = compute_ema(&closes_swing, EMA_SHORT_PERIOD);
-        let ema50_swing = compute_ema(&closes_swing, EMA_LONG_PERIOD);
-        let macd_swing = compute_macd(&closes_swing);
-        let rsi14_swing = compute_rsi(&closes_swing, RSI_LONG_PERIOD);
-        let atr3_swing = compute_atr(&swing, ATR_FAST_PERIOD);
-        let atr14_swing = compute_atr(&swing, ATR_SLOW_PERIOD);
-        let oi_stats = self.fetch_open_interest(inst_id).await.unwrap_or_default();
-        let funding_rate = self.fetch_funding_rate(inst_id).await.unwrap_or(None);
-        let current_price = closes_intraday.last().copied();
-        let swing_volume_current = swing_volumes.last().copied();
-        let swing_volume_avg = average_tail(&swing_volumes, VOLUME_AVG_PERIOD);
-        Ok(InstrumentAnalytics {
-            inst_id: inst_id.to_string(),
-            symbol: inst_symbol(inst_id),
-            current_price,
-            current_ema20: ema20_intraday.last().copied(),
-            current_macd: macd_intraday.last().copied(),
-            current_rsi7: rsi7_intraday.last().copied(),
-            oi_latest: oi_stats.latest,
-            oi_average: oi_stats.average,
-            funding_rate,
-            intraday_prices: take_tail(&closes_intraday, ANALYTICS_SERIES_TAIL),
-            intraday_ema20: take_tail(&ema20_intraday, ANALYTICS_SERIES_TAIL),
-            intraday_macd: take_tail(&macd_intraday, ANALYTICS_SERIES_TAIL),
-            intraday_rsi7: take_tail(&rsi7_intraday, ANALYTICS_SERIES_TAIL),
-            intraday_rsi14: take_tail(&rsi14_intraday, ANALYTICS_SERIES_TAIL),
-            swing_ema20: ema20_swing.last().copied(),
-            swing_ema50: ema50_swing.last().copied(),
-            swing_atr3: atr3_swing.last().copied(),
-            swing_atr14: atr14_swing.last().copied(),
-            swing_volume_current,
-            swing_volume_avg,
-            swing_macd: take_tail(&macd_swing, ANALYTICS_SERIES_TAIL),
-            swing_rsi14: take_tail(&rsi14_swing, ANALYTICS_SERIES_TAIL),
-        })
-    }
-
-    async fn fetch_candles(&self, inst_id: &str, bar: &str, limit: usize) -> Result<Vec<Candle>> {
-        let limit_str = limit.to_string();
-        let response: MarketCandleResponse = self
-            .http
-            .get(MARKET_CANDLES_ENDPOINT)
-            .query(&[
-                ("instId", inst_id),
-                ("bar", bar),
-                ("limit", limit_str.as_str()),
-            ])
-            .send()
-            .await
-            .with_context(|| format!("请求 {} {} K 线失败", inst_id, bar))?
-            .error_for_status()
-            .with_context(|| format!("{} {} K 线响应异常", inst_id, bar))?
-            .json()
-            .await
-            .with_context(|| format!("解析 {} {} K 线数据失败", inst_id, bar))?;
-        if response.code != "0" {
-            return Err(anyhow!(
-                "{} {} K 线接口返回错误 (code {}): {}",
-                inst_id,
-                bar,
-                response.code,
-                response.msg
-            ));
-        }
-        let mut candles = Vec::new();
-        for entry in response.data {
-            if let Some(candle) = Candle::from_entry(&entry) {
-                candles.push(candle);
-            }
-        }
-        candles.sort_by_key(|c| c.ts);
-        Ok(candles)
-    }
-
-    async fn fetch_funding_rate(&self, inst_id: &str) -> Result<Option<f64>> {
-        let response: FundingRateResponse = self
-            .http
-            .get(FUNDING_RATE_ENDPOINT)
-            .query(&[("instId", inst_id)])
-            .send()
-            .await
-            .with_context(|| format!("请求 {} 融资利率失败", inst_id))?
-            .error_for_status()
-            .with_context(|| format!("{} 融资利率响应异常", inst_id))?
-            .json()
-            .await
-            .with_context(|| format!("解析 {} 融资利率失败", inst_id))?;
-        if response.code != "0" {
-            return Err(anyhow!(
-                "{} funding rate failed (code {}): {}",
-                inst_id,
-                response.code,
-                response.msg
-            ));
-        }
-        Ok(response
-            .data
-            .first()
-            .and_then(|entry| parse_f64(&entry.funding_rate)))
-    }
-
-    async fn fetch_open_interest(&self, inst_id: &str) -> Result<OpenInterestStats> {
-        let latest = self.fetch_open_interest_latest(inst_id).await?;
-        let history = self.fetch_open_interest_history(inst_id).await?;
-        let avg = if history.is_empty() {
-            latest
-        } else {
-            Some(history.iter().sum::<f64>() / history.len() as f64)
-        };
-        Ok(OpenInterestStats {
-            latest,
-            average: avg,
-        })
-    }
-
-    async fn fetch_open_interest_latest(&self, inst_id: &str) -> Result<Option<f64>> {
-        let response: OpenInterestResponse = self
-            .http
-            .get(OPEN_INTEREST_ENDPOINT)
-            .query(&[("instType", "SWAP"), ("instId", inst_id)])
-            .send()
-            .await
-            .with_context(|| format!("请求 {} 未平仓合约失败", inst_id))?
-            .error_for_status()
-            .with_context(|| format!("{} 未平仓合约响应异常", inst_id))?
-            .json()
-            .await
-            .with_context(|| format!("解析 {} 未平仓合约失败", inst_id))?;
-        if response.code != "0" {
-            return Err(anyhow!(
-                "{} open interest failed (code {}): {}",
-                inst_id,
-                response.code,
-                response.msg
-            ));
-        }
-        Ok(response.data.first().and_then(|entry| parse_f64(&entry.oi)))
-    }
-
-    async fn fetch_open_interest_history(&self, inst_id: &str) -> Result<Vec<f64>> {
-        let response: OpenInterestHistoryResponse = self
-            .http
-            .get(OPEN_INTEREST_HISTORY_ENDPOINT)
-            .query(&[("instType", "SWAP"), ("instId", inst_id), ("period", "8H")])
-            .send()
-            .await
-            .with_context(|| format!("请求 {} 未平仓合约历史失败", inst_id))?
-            .error_for_status()
-            .with_context(|| format!("{} 未平仓合约历史响应异常", inst_id))?
-            .json()
-            .await
-            .with_context(|| format!("解析 {} 未平仓合约历史失败", inst_id))?;
-        if response.code != "0" {
-            return Err(anyhow!(
-                "{} open interest history failed (code {}): {}",
-                inst_id,
-                response.code,
-                response.msg
-            ));
-        }
-        let mut values = Vec::new();
-        for entry in response.data {
-            if let Some(value) = parse_f64(&entry.oi) {
-                values.push(value);
-            }
-        }
-        Ok(values)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Candle {
-    ts: i64,
-    high: f64,
-    low: f64,
-    close: f64,
-    volume: f64,
-}
-
-impl Candle {
-    fn from_entry(entry: &[String]) -> Option<Self> {
-        if entry.len() < 6 {
-            return None;
-        }
-        Some(Candle {
-            ts: entry.get(0)?.parse().ok()?,
-            high: parse_f64(entry.get(2)?)?,
-            low: parse_f64(entry.get(3)?)?,
-            close: parse_f64(entry.get(4)?)?,
-            volume: parse_f64(entry.get(5)?)?,
-        })
-    }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct MarketCandleResponse {
-    code: String,
-    msg: String,
-    data: Vec<Vec<String>>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FundingRateResponse {
-    code: String,
-    msg: String,
-    data: Vec<FundingRateEntry>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FundingRateEntry {
-    funding_rate: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenInterestResponse {
-    code: String,
-    msg: String,
-    data: Vec<OpenInterestEntry>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenInterestEntry {
-    oi: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenInterestHistoryResponse {
-    code: String,
-    msg: String,
-    data: Vec<OpenInterestHistoryEntry>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenInterestHistoryEntry {
-    oi: String,
 }
 
 fn build_snapshot_prompt(
@@ -1476,7 +1153,7 @@ fn append_market_analytics(buffer: &mut String, analytics: &[InstrumentAnalytics
         ));
         buffer.push_str("**永续合约指标：**\n");
         buffer.push_str(&format!(
-            "- 未平仓合约：最新：{} |平均值：{}\n",
+            "- 未平仓合约：最新：{} | 平均值：{}\n",
             optional_float(entry.oi_latest),
             optional_float(entry.oi_average)
         ));
@@ -1693,133 +1370,6 @@ fn compute_sharpe(returns: &[f64]) -> Option<f64> {
     } else {
         None
     }
-}
-
-fn take_tail(values: &[f64], count: usize) -> Vec<f64> {
-    if count == 0 || values.is_empty() {
-        Vec::new()
-    } else if values.len() <= count {
-        values.to_vec()
-    } else {
-        values[values.len() - count..].to_vec()
-    }
-}
-
-fn average_tail(values: &[f64], period: usize) -> Option<f64> {
-    if values.is_empty() || period == 0 {
-        return None;
-    }
-    let start = values.len().saturating_sub(period);
-    let slice = &values[start..];
-    if slice.is_empty() {
-        None
-    } else {
-        Some(slice.iter().sum::<f64>() / slice.len() as f64)
-    }
-}
-
-fn compute_ema(series: &[f64], period: usize) -> Vec<f64> {
-    if series.is_empty() || period == 0 {
-        return Vec::new();
-    }
-    let mut ema_values = Vec::with_capacity(series.len());
-    let k = 2.0 / (period as f64 + 1.0);
-    let mut ema = series[0];
-    for &value in series {
-        ema = value * k + ema * (1.0 - k);
-        ema_values.push(ema);
-    }
-    ema_values
-}
-
-fn compute_macd(series: &[f64]) -> Vec<f64> {
-    if series.is_empty() {
-        return Vec::new();
-    }
-    let fast = compute_ema(series, MACD_FAST_PERIOD);
-    let slow = compute_ema(series, MACD_SLOW_PERIOD);
-    fast.iter()
-        .zip(slow.iter())
-        .map(|(f, s)| f - s)
-        .collect::<Vec<f64>>()
-}
-
-fn compute_rsi(series: &[f64], period: usize) -> Vec<f64> {
-    if series.len() < 2 || period == 0 {
-        return Vec::new();
-    }
-    let mut rsis = vec![50.0; series.len()];
-    if series.len() <= period {
-        return rsis;
-    }
-    let mut gain_sum = 0.0;
-    let mut loss_sum = 0.0;
-    for i in 1..=period {
-        let delta = series[i] - series[i - 1];
-        if delta >= 0.0 {
-            gain_sum += delta;
-        } else {
-            loss_sum -= delta;
-        }
-    }
-    let mut avg_gain = gain_sum / period as f64;
-    let mut avg_loss = loss_sum / period as f64;
-    rsis[period] = rsi_from_avg(avg_gain, avg_loss);
-    for i in (period + 1)..series.len() {
-        let delta = series[i] - series[i - 1];
-        let gain = delta.max(0.0);
-        let loss = (-delta).max(0.0);
-        avg_gain = (avg_gain * (period as f64 - 1.0) + gain) / period as f64;
-        avg_loss = (avg_loss * (period as f64 - 1.0) + loss) / period as f64;
-        rsis[i] = rsi_from_avg(avg_gain, avg_loss);
-    }
-    rsis
-}
-
-fn rsi_from_avg(avg_gain: f64, avg_loss: f64) -> f64 {
-    if avg_loss.abs() < f64::EPSILON {
-        100.0
-    } else {
-        let rs = avg_gain / avg_loss;
-        100.0 - (100.0 / (1.0 + rs))
-    }
-}
-
-fn compute_atr(candles: &[Candle], period: usize) -> Vec<f64> {
-    if candles.is_empty() || period == 0 {
-        return Vec::new();
-    }
-    let mut atr_values = vec![0.0; candles.len()];
-    let mut tr_values = Vec::with_capacity(candles.len());
-    for (idx, candle) in candles.iter().enumerate() {
-        let prev_close = if idx == 0 {
-            candle.close
-        } else {
-            candles[idx - 1].close
-        };
-        let tr = (candle.high - candle.low)
-            .max((candle.high - prev_close).abs())
-            .max((candle.low - prev_close).abs());
-        tr_values.push(tr);
-    }
-    if tr_values.len() <= period {
-        return atr_values;
-    }
-    let mut atr = tr_values[..period].iter().sum::<f64>() / period as f64;
-    atr_values[period] = atr;
-    for idx in (period + 1)..tr_values.len() {
-        atr = ((period as f64 - 1.0) * atr + tr_values[idx]) / period as f64;
-        atr_values[idx] = atr;
-    }
-    atr_values
-}
-
-fn inst_symbol(inst_id: &str) -> String {
-    inst_id.split('-').next().unwrap_or(inst_id).to_string()
-}
-
-fn parse_f64<S: AsRef<str>>(value: S) -> Option<f64> {
-    value.as_ref().trim().parse().ok()
 }
 
 fn normalize_inst_ids(inst_ids: Vec<String>) -> Vec<String> {
