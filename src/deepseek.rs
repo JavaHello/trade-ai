@@ -212,7 +212,15 @@ impl DeepseekReporter {
         }
         self.capture_leverage_from_snapshot(&snapshot).await;
         let leverage_overview = self.leverage_overview().await;
-        let analytics = self.collect_market_analytics().await;
+        let analytics = match self.collect_market_analytics().await {
+            Ok(entries) => entries,
+            Err(err) => {
+                let _ = self.tx.send(Command::Error(format!(
+                    "市场指标不完整，跳过本轮 AI 决策: {err}"
+                )));
+                return Ok(());
+            }
+        };
         let performance = match self.performance.summary(self.interval) {
             Ok(summary) => {
                 if summary.overall.is_none() && summary.recent.is_none() {
@@ -256,11 +264,12 @@ impl DeepseekReporter {
         Ok(())
     }
 
-    async fn collect_market_analytics(&self) -> Vec<InstrumentAnalytics> {
+    async fn collect_market_analytics(&self) -> Result<Vec<InstrumentAnalytics>> {
         if self.inst_ids.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let mut analytics = Vec::new();
+        let mut has_error = false;
         for inst_id in self.inst_ids.iter().take(MAX_ANALYTICS_INSTRUMENTS) {
             match self.market.fetch_inst(inst_id).await {
                 Ok(entry) => analytics.push(entry),
@@ -269,10 +278,15 @@ impl DeepseekReporter {
                         "加载 {} 市场指标失败: {err}",
                         inst_id
                     )));
+                    has_error = true;
                 }
             }
         }
-        analytics
+        if has_error {
+            Err(anyhow!("部分市场指标加载失败"))
+        } else {
+            Ok(analytics)
+        }
     }
 
     async fn capture_leverage_from_snapshot(&self, snapshot: &AccountSnapshot) {

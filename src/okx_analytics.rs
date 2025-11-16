@@ -8,7 +8,7 @@ const MARKET_CANDLES_ENDPOINT: &str = "https://www.okx.com/api/v5/market/candles
 const FUNDING_RATE_ENDPOINT: &str = "https://www.okx.com/api/v5/public/funding-rate";
 const OPEN_INTEREST_ENDPOINT: &str = "https://www.okx.com/api/v5/public/open-interest";
 const OPEN_INTEREST_HISTORY_ENDPOINT: &str =
-    "https://www.okx.com/api/v5/public/open-interest-history";
+    "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history";
 const ANALYTICS_INTRADAY_LIMIT: usize = 160;
 const ANALYTICS_SWING_LIMIT: usize = 120;
 const ANALYTICS_SERIES_TAIL: usize = 8;
