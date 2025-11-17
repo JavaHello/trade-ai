@@ -1327,7 +1327,7 @@ fn append_market_analytics(buffer: &mut String, analytics: &[InstrumentAnalytics
     }
     buffer.push_str("\n【市场技术指标】\n");
     for entry in analytics {
-        buffer.push_str(&format!("## {} ({})\n", entry.symbol, entry.inst_id));
+        buffer.push_str(&format!("\n## {} ({})\n", entry.symbol, entry.inst_id));
         buffer.push_str("**当前价格**\n");
         buffer.push_str(&format!(
             "- current_price = {}\n",
