@@ -7,6 +7,7 @@
 - 通过 OKX WebSocket 实时订阅合约 `mark-price`
 - 在 TUI 中绘制价格曲线并展示涨跌幅
 - 可选启用 Deepseek AI，周期性读取账户/技术指标并可自动生成交易指令
+   - 提示词来源: 基于 [nof1 ai 逆向](https://gist.github.com/wquguru/7d268099b8c04b7e5b6ad6fae922ae83) 修改
 - 预加载一定窗口的历史数据，方便刚启动时快速回看走势
 - 将成交明细、AI 决策、错误信息持久化到本地 JSONL 文件，TUI 交易页可随时回看
 - 在交易视图中可直接向 OKX 下单，指令会通过 Tokio channel 发送到 OKX 交易 API
