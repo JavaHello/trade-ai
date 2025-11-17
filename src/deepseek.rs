@@ -10,8 +10,8 @@ use tokio::time::{self, MissedTickBehavior};
 
 use crate::command::{
     AccountBalanceDelta, AccountSnapshot, AiInsightRecord, Command, PendingOrderInfo, PositionInfo,
-    SetLeverageRequest, TradeEvent, TradeFill, TradeOperator, TradeOrderKind, TradeRequest,
-    TradeSide, TradingCommand,
+    SetLeverageRequest, TradeEvent, TradeOperator, TradeOrderKind, TradeRequest, TradeSide,
+    TradingCommand,
 };
 use crate::config::DeepseekConfig;
 use crate::error_log::ErrorLogStore;
@@ -1028,19 +1028,17 @@ impl PerformanceTracker {
             .unwrap_or_else(Local::now);
         let mut fill_count = 0usize;
         let mut pnls = Vec::new();
-        let mut sharpe_returns = Vec::new();
         for entry in entries {
             if entry.timestamp < start_time {
                 continue;
             }
             if let TradeEvent::Fill(fill) = &entry.event {
-                fill_count += 1;
-                if let Some(pnl) = fill.pnl {
+                if let Some(pnl) = fill.pnl
+                    && fill.exec_type.is_some()
+                {
+                    fill_count += 1;
                     if pnl.is_finite() {
-                        pnls.push(pnl);
-                        if !Self::is_maker_buy_fill(fill) {
-                            sharpe_returns.push(pnl);
-                        }
+                        pnls.push(pnl + fill.fee.unwrap_or(0.0));
                     }
                 }
             }
@@ -1049,7 +1047,7 @@ impl PerformanceTracker {
             return None;
         }
         let total_pnl: f64 = pnls.iter().copied().sum();
-        let sharpe_ratio = compute_sharpe(&sharpe_returns);
+        let sharpe_ratio = compute_sharpe(&pnls);
         Some(PerformanceStats {
             label,
             start_timestamp_ms,
@@ -1057,18 +1055,6 @@ impl PerformanceTracker {
             sharpe_ratio,
             total_pnl,
         })
-    }
-
-    fn is_maker_buy_fill(fill: &TradeFill) -> bool {
-        if fill.side != TradeSide::Buy {
-            return false;
-        }
-        match fill.exec_type.as_deref() {
-            Some(exec_type) => {
-                exec_type.eq_ignore_ascii_case("m") || exec_type.eq_ignore_ascii_case("maker")
-            }
-            None => false,
-        }
     }
 }
 
