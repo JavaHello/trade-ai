@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration as ChronoDuration, Local, TimeZone};
-use reqwest::Client;
+use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::time::{self, MissedTickBehavior};
@@ -1591,7 +1591,11 @@ struct DeepseekClient {
 impl DeepseekClient {
     fn new(config: &DeepseekConfig) -> Result<Self> {
         Ok(DeepseekClient {
-            http: Client::builder().timeout(Duration::from_secs(20)).build()?,
+            http: ClientBuilder::new()
+                .connect_timeout(Duration::from_secs(5))
+                .read_timeout(Duration::from_secs(120))
+                .timeout(Duration::from_secs(140))
+                .build()?,
             base_url: config.endpoint.clone(),
             api_key: config.api_key.clone(),
             model: config.model.clone(),
