@@ -1928,6 +1928,9 @@ impl TuiApp {
     }
 
     fn ai_operation_label(entry: &AiDecisionRecord) -> String {
+        if entry.analysis_error.is_some() {
+            return "解析失败".to_string();
+        }
         if entry.operations.is_empty() {
             return "未识别".to_string();
         }
@@ -2424,7 +2427,12 @@ impl TuiApp {
                 .fg(Color::LightBlue)
                 .add_modifier(Modifier::BOLD),
         )));
-        if entry.operations.is_empty() {
+        if let Some(error) = entry.analysis_error.as_deref() {
+            lines.push(Line::from(Span::styled(
+                format!("解析失败: {error}"),
+                Style::default().fg(Color::LightRed),
+            )));
+        } else if entry.operations.is_empty() {
             lines.push(Line::from("未解析到决策操作"));
         } else {
             for (idx, operation) in entry.operations.iter().enumerate() {

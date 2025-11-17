@@ -10,10 +10,11 @@ use tokio::time::{self, MissedTickBehavior};
 
 use crate::command::{
     AccountBalanceDelta, AccountSnapshot, AiInsightRecord, Command, PendingOrderInfo, PositionInfo,
-    SetLeverageRequest, TradeEvent, TradeOperator, TradeOrderKind, TradeRequest, TradeSide,
-    TradingCommand,
+    SetLeverageRequest, TradeEvent, TradeFill, TradeOperator, TradeOrderKind, TradeRequest,
+    TradeSide, TradingCommand,
 };
 use crate::config::DeepseekConfig;
+use crate::error_log::ErrorLogStore;
 use crate::okx::{MarketInfo, SharedAccountState};
 use crate::okx_analytics::{InstrumentAnalytics, MarketDataFetcher};
 use crate::trade_log::{TradeLogEntry, TradeLogStore};
@@ -277,6 +278,7 @@ pub struct DeepseekReporter {
     market: MarketDataFetcher,
     performance: PerformanceTracker,
     order_tx: Option<mpsc::Sender<TradingCommand>>,
+    error_log: ErrorLogStore,
 }
 
 impl DeepseekReporter {
@@ -294,6 +296,7 @@ impl DeepseekReporter {
         let inst_ids = normalize_inst_ids(inst_ids);
         let performance = PerformanceTracker::new(start_timestamp_ms);
         let leverage_cache = RwLock::new(initial_leverage_cache(&markets));
+        let error_log = ErrorLogStore::new(ErrorLogStore::default_path());
         Ok(DeepseekReporter {
             client,
             state,
@@ -305,6 +308,7 @@ impl DeepseekReporter {
             market,
             performance,
             order_tx,
+            error_log,
         })
     }
 
@@ -526,6 +530,7 @@ impl DeepseekReporter {
         let decisions = match parse_ai_decisions(response) {
             Ok(payloads) => payloads,
             Err(err) => {
+                self.log_decision_parse_failure(&err, response);
                 return Err(anyhow!("解析 AI 决策失败: {err}"));
             }
         };
@@ -700,6 +705,13 @@ impl DeepseekReporter {
             kind: TradeOrderKind::Regular,
         };
         self.submit_trade_request(request).await
+    }
+
+    fn log_decision_parse_failure(&self, err: &anyhow::Error, response: &str) {
+        let message = format!("AI 决策解析失败: {err}\n响应原文:\n{response}",);
+        if let Err(write_err) = self.error_log.append_message(message) {
+            eprintln!("failed to persist AI response log: {write_err}");
+        }
     }
 
     async fn submit_trade_request(&self, request: TradeRequest) -> Result<()> {
@@ -1016,6 +1028,7 @@ impl PerformanceTracker {
             .unwrap_or_else(Local::now);
         let mut fill_count = 0usize;
         let mut pnls = Vec::new();
+        let mut sharpe_returns = Vec::new();
         for entry in entries {
             if entry.timestamp < start_time {
                 continue;
@@ -1025,6 +1038,9 @@ impl PerformanceTracker {
                 if let Some(pnl) = fill.pnl {
                     if pnl.is_finite() {
                         pnls.push(pnl);
+                        if !Self::is_maker_buy_fill(fill) {
+                            sharpe_returns.push(pnl);
+                        }
                     }
                 }
             }
@@ -1033,7 +1049,7 @@ impl PerformanceTracker {
             return None;
         }
         let total_pnl: f64 = pnls.iter().copied().sum();
-        let sharpe_ratio = compute_sharpe(&pnls);
+        let sharpe_ratio = compute_sharpe(&sharpe_returns);
         Some(PerformanceStats {
             label,
             start_timestamp_ms,
@@ -1041,6 +1057,18 @@ impl PerformanceTracker {
             sharpe_ratio,
             total_pnl,
         })
+    }
+
+    fn is_maker_buy_fill(fill: &TradeFill) -> bool {
+        if fill.side != TradeSide::Buy {
+            return false;
+        }
+        match fill.exec_type.as_deref() {
+            Some(exec_type) => {
+                exec_type.eq_ignore_ascii_case("m") || exec_type.eq_ignore_ascii_case("maker")
+            }
+            None => false,
+        }
     }
 }
 
@@ -1614,7 +1642,15 @@ impl DeepseekClient {
             let body = response.text().await.unwrap_or_default();
             return Err(anyhow!("Deepseek 返回错误: {} - {}", status, body));
         }
-        let completion: ChatCompletionResponse = response.json().await?;
+        let response_text = response.text().await.unwrap_or_default();
+        let completion: ChatCompletionResponse =
+            serde_json::from_str(&response_text).map_err(|err| {
+                anyhow!(
+                    "解析 Deepseek 响应失败: {}\n响应原文:\n{}",
+                    err,
+                    response_text
+                )
+            })?;
         let choice = completion
             .choices
             .into_iter()

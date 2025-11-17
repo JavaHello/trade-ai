@@ -16,6 +16,7 @@ pub struct AiDecisionRecord {
     pub response: String,
     pub justification: Option<String>,
     pub operations: Vec<AiDecisionOperation>,
+    pub analysis_error: Option<String>,
 }
 
 impl AiDecisionRecord {
@@ -24,7 +25,8 @@ impl AiDecisionRecord {
             LocalResult::Single(dt) => dt,
             _ => Local::now(),
         };
-        let (justification, operations) = Self::analyze_response(&payload.response, None);
+        let (justification, operations, analysis_error) =
+            Self::analyze_response(&payload.response, None);
         AiDecisionRecord {
             timestamp,
             system_prompt: payload.system_prompt,
@@ -32,10 +34,17 @@ impl AiDecisionRecord {
             response: payload.response,
             justification,
             operations,
+            analysis_error,
         }
     }
 
     pub fn summary(&self) -> String {
+        if let Some(error) = self.analysis_error.as_deref() {
+            let trimmed = error.trim();
+            if !trimmed.is_empty() {
+                return format!("解析失败: {trimmed}");
+            }
+        }
         if let Some(justification) = self.justification.as_deref() {
             let trimmed = justification.trim();
             if !trimmed.is_empty() {
@@ -84,17 +93,20 @@ impl AiDecisionRecord {
         response: String,
         justification: Option<String>,
         operations: Vec<AiDecisionOperation>,
+        analysis_error: Option<String>,
     ) -> Self {
         let timestamp = match Local.timestamp_millis_opt(timestamp_ms) {
             LocalResult::Single(dt) => dt,
             _ => Local::now(),
         };
-        let (justification, derived_operations) = Self::analyze_response(&response, justification);
+        let (justification, derived_operations, derived_error) =
+            Self::analyze_response(&response, justification);
         let operations = if operations.is_empty() {
             derived_operations
         } else {
             operations
         };
+        let analysis_error = analysis_error.or(derived_error);
         AiDecisionRecord {
             timestamp,
             system_prompt,
@@ -102,6 +114,7 @@ impl AiDecisionRecord {
             response,
             justification,
             operations,
+            analysis_error,
         }
     }
 
@@ -112,25 +125,40 @@ impl AiDecisionRecord {
     fn analyze_response(
         response: &str,
         provided: Option<String>,
-    ) -> (Option<String>, Vec<AiDecisionOperation>) {
-        let parsed = Self::parse_json_block(response);
+    ) -> (Option<String>, Vec<AiDecisionOperation>, Option<String>) {
+        let (parsed, analysis_error) = match Self::parse_json_block(response) {
+            Ok(parsed) => (Some(parsed), None),
+            Err(err) => (None, Some(err)),
+        };
         let justification = Self::derive_justification(parsed.as_ref(), provided);
         let operations = Self::derive_operations(parsed.as_ref());
-        (justification, operations)
+        (justification, operations, analysis_error)
     }
 
-    fn parse_json_block(response: &str) -> Option<serde_json::Value> {
-        serde_json::from_str::<serde_json::Value>(response)
-            .ok()
-            .or_else(|| {
-                let start = response.find('{')?;
-                let end = response.rfind('}')?;
-                if end <= start {
-                    return None;
+    fn parse_json_block(response: &str) -> Result<serde_json::Value, String> {
+        match serde_json::from_str::<serde_json::Value>(response) {
+            Ok(value) => Ok(value),
+            Err(primary_err) => {
+                if let Some(slice) = Self::extract_json_slice(response, '[', ']') {
+                    return serde_json::from_str::<serde_json::Value>(slice)
+                        .map_err(|err| format!("解析 JSON 数组片段失败: {err}"));
                 }
-                let slice = response.get(start..=end)?;
-                serde_json::from_str::<serde_json::Value>(slice).ok()
-            })
+                if let Some(slice) = Self::extract_json_slice(response, '{', '}') {
+                    return serde_json::from_str::<serde_json::Value>(slice)
+                        .map_err(|err| format!("解析 JSON 对象片段失败: {err}"));
+                }
+                Err(format!("无法解析 AI JSON: {primary_err}"))
+            }
+        }
+    }
+
+    fn extract_json_slice<'a>(response: &'a str, start: char, end: char) -> Option<&'a str> {
+        let start_idx = response.find(start)?;
+        let end_idx = response.rfind(end)?;
+        if end_idx <= start_idx {
+            return None;
+        }
+        response.get(start_idx..=end_idx)
     }
 
     fn derive_justification(
@@ -294,6 +322,8 @@ struct StoredAiDecision {
     operations: Vec<AiDecisionOperation>,
     #[serde(default, rename = "operation", skip_serializing)]
     legacy_operation: Option<AiDecisionOperation>,
+    #[serde(default)]
+    analysis_error: Option<String>,
 }
 
 impl StoredAiDecision {
@@ -312,6 +342,7 @@ impl StoredAiDecision {
             self.response,
             self.justification,
             operations,
+            self.analysis_error,
         )
     }
 }
@@ -326,6 +357,7 @@ impl From<&AiDecisionRecord> for StoredAiDecision {
             justification: value.justification.clone(),
             operations: value.operations.clone(),
             legacy_operation: None,
+            analysis_error: value.analysis_error.clone(),
         }
     }
 }
