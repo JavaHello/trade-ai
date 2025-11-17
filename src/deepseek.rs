@@ -708,10 +708,12 @@ impl DeepseekReporter {
     }
 
     fn log_decision_parse_failure(&self, err: &anyhow::Error, response: &str) {
-        let message = format!("AI 决策解析失败: {err}\n响应原文:\n{response}",);
-        if let Err(write_err) = self.error_log.append_message(message) {
-            eprintln!("failed to persist AI response log: {write_err}");
-        }
+        let message = format!(
+            "AI 决策解析失败: {err}\n响应原文:\n{response}",
+            err = err,
+            response = response
+        );
+        let _ = self.error_log.append_message(message);
     }
 
     async fn submit_trade_request(&self, request: TradeRequest) -> Result<()> {
