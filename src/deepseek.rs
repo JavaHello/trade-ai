@@ -11,9 +11,9 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::time;
 
 use crate::command::{
-    AccountBalanceDelta, AccountSnapshot, AiInsightRecord, Command, PendingOrderInfo, PositionInfo,
-    SetLeverageRequest, TradeEvent, TradeOperator, TradeOrderKind, TradeRequest, TradeSide,
-    TradingCommand,
+    AccountBalanceDelta, AccountSnapshot, AiInsightRecord, CancelOrderRequest, Command,
+    PendingOrderInfo, PositionInfo, SetLeverageRequest, TradeEvent, TradeOperator, TradeOrderKind,
+    TradeRequest, TradeSide, TradingCommand,
 };
 use crate::config::{ConfiguredTimeZone, DeepseekConfig};
 use crate::error_log::ErrorLogStore;
@@ -110,11 +110,11 @@ impl DeepseekReporter {
         if max_dispatch <= min_delay {
             return max_dispatch;
         }
-        let min_secs = min_delay.as_secs_f64();
-        let max_secs = max_dispatch.as_secs_f64();
+        let min_secs = min_delay.as_secs();
+        let max_secs = max_dispatch.as_secs();
         let mut rng = rand::rng();
         let seconds = rng.random_range(min_secs..=max_secs);
-        Duration::from_secs_f64(seconds)
+        Duration::from_secs(seconds)
     }
 
     async fn report_once(&self) -> Result<()> {
@@ -328,6 +328,7 @@ impl DeepseekReporter {
                     self.place_entry_order(&decision, analytics).await?
                 }
                 DecisionSignal::Close => self.execute_close_signal(&decision, analytics).await?,
+                DecisionSignal::CancelOrders => self.cancel_orders(&decision).await?,
             };
         }
         Ok(())
@@ -492,6 +493,45 @@ impl DeepseekReporter {
             kind: TradeOrderKind::Regular,
         };
         self.submit_trade_request(request).await
+    }
+
+    async fn cancel_orders(&self, decision: &AiDecisionPayload) -> Result<()> {
+        let Some(order_tx) = &self.order_tx else {
+            return Ok(());
+        };
+        let inst_id = self
+            .resolve_inst_id(&decision.coin)
+            .ok_or_else(|| anyhow!("无法匹配交易币种 {}", decision.coin))?;
+        let snapshot = self.state.snapshot().await;
+        let cancel_orders = decision.cancel_orders.as_ref().context("缺少撤单列表")?;
+        let orders: Vec<_> = snapshot
+            .open_orders
+            .into_iter()
+            .filter(|order| {
+                order.inst_id.eq_ignore_ascii_case(&inst_id)
+                    && cancel_orders.contains(&order.ord_id)
+            })
+            .collect();
+        if orders.is_empty() {
+            let _ = self.tx.send(Command::Error(format!(
+                "Deepseek 未找到 {inst_id} 的 AI 挂单可撤，已忽略撤单信号"
+            )));
+            return Ok(());
+        }
+        for order in orders {
+            let request = CancelOrderRequest {
+                inst_id: order.inst_id.clone(),
+                ord_id: order.ord_id.clone(),
+                operator: ai_operator(),
+                pos_side: order.pos_side.clone(),
+                kind: order.kind,
+            };
+            order_tx
+                .send(TradingCommand::Cancel(request))
+                .await
+                .map_err(|err| anyhow!("发送撤单命令失败: {err}"))?;
+        }
+        Ok(())
     }
 
     fn log_decision_parse_failure(&self, err: &anyhow::Error, response: &str) {
@@ -714,6 +754,8 @@ struct AiDecisionPayload {
     #[allow(dead_code)]
     confidence: f64,
     #[serde(default)]
+    cancel_orders: Option<Vec<String>>,
+    #[serde(default)]
     #[allow(dead_code)]
     risk_usd: f64,
     #[serde(default)]
@@ -728,6 +770,7 @@ enum DecisionSignal {
     SellToEnter,
     Hold,
     Close,
+    CancelOrders,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1314,6 +1357,7 @@ fn format_order(order: &PendingOrderInfo, timezone: ConfiguredTimeZone) -> Strin
     if let Some(timestamp) = format_timestamp_label(order.create_time, timezone) {
         segments.push(format!("创建 {}", timestamp));
     }
+    segments.push(format!("订单号 {}", order.ord_id));
     segments.join(" · ")
 }
 

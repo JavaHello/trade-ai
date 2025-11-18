@@ -50,6 +50,9 @@
 4. **close**：平掉某个已有仓位
    - 使用场景：达到止盈、触发止损、或交易逻辑失效
 
+5. **cancel_orders**：取消未成交订单
+   - 使用场景：市场条件变化，需要调整未成交订单
+
 ## 仓位管理限制
 
 - **禁止加仓**：每个币种只能持有一个仓位，不可加码
@@ -123,7 +126,7 @@
 ```json
 [
   {
-  "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close",
+  "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close" | "cancel_orders",
   "coin": "<string>",
   "quantity": <float>,
   "leverage": <integer 1-20>,
@@ -132,6 +135,7 @@
   "invalidation_condition": "<string>",
   "confidence": <float 0-1>,
   "risk_usd": <float>,
+  "cancel_orders": ["<string>","<string>"], // 仅 signal="cancel_orders" 时使用，列出要取消的订单 ID
   "justification": "<string>" // 使用中文输出
   },
   // ... additional positions if any
@@ -140,7 +144,7 @@
 
 ### 输出验证规则
 
-- 非 hold 情况下：所有数字必须为正数
+- 非 hold,cancel_orders 情况下：所有数字必须为正数
 - quantity：除信号为 “hold” 外，`quantity` 必须是 0.01 的整数倍（0.01 × n）
 - 多单(buy_to_enter) → 止盈高于开仓价，止损低于开仓价
 - 空单(sell_to_enter) → 止盈低于开仓价，止损高于开仓价
