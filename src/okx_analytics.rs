@@ -47,7 +47,7 @@ pub struct InstrumentAnalytics {
     pub swing_volume_avg: Option<f64>,
     pub swing_macd: Vec<f64>,
     pub swing_rsi14: Vec<f64>,
-    pub recent_candles_3m: Vec<KlineRecord>,
+    pub recent_candles_5m: Vec<KlineRecord>,
     pub recent_candles_4h: Vec<KlineRecord>,
 }
 
@@ -83,10 +83,10 @@ impl MarketDataFetcher {
 
     pub async fn fetch_inst(&self, inst_id: &str) -> Result<InstrumentAnalytics> {
         let intraday = self
-            .fetch_candles(inst_id, "3m", ANALYTICS_INTRADAY_LIMIT)
+            .fetch_candles(inst_id, "5m", ANALYTICS_INTRADAY_LIMIT)
             .await?;
         if intraday.is_empty() {
-            return Err(anyhow!("{} 缺少 3 分钟 K 线数据", inst_id));
+            return Err(anyhow!("{} 缺少 5 分钟 K 线数据", inst_id));
         }
         let swing = self
             .fetch_candles(inst_id, "4H", ANALYTICS_SWING_LIMIT)
@@ -132,7 +132,7 @@ impl MarketDataFetcher {
             swing_volume_avg,
             swing_macd: take_tail(&macd_swing, ANALYTICS_SERIES_TAIL),
             swing_rsi14: take_tail(&rsi14_swing, ANALYTICS_SERIES_TAIL),
-            recent_candles_3m: take_tail_candles(&intraday, RECENT_KLINE_TAIL),
+            recent_candles_5m: take_tail_candles(&intraday, RECENT_KLINE_TAIL),
             recent_candles_4h: take_tail_candles(&swing, RECENT_KLINE_TAIL),
         })
     }

@@ -1132,7 +1132,7 @@ fn append_market_analytics(
             "- 资金费率：{}\n",
             optional_float(entry.funding_rate)
         ));
-        buffer.push_str("**日内走势（3分钟间隔，最早→最新）：**\n");
+        buffer.push_str("**日内走势（5分钟间隔，最早→最新）：**\n");
         buffer.push_str(&format!(
             "中间价：{}\n",
             format_series(&entry.intraday_prices)
@@ -1186,11 +1186,11 @@ fn append_recent_kline_table(
     entry: &InstrumentAnalytics,
     timezone: ConfiguredTimeZone,
 ) {
-    if !entry.recent_candles_3m.is_empty() {
-        buffer.push_str("**最近 3 分钟 K 线（旧→新）：**\n");
+    if !entry.recent_candles_5m.is_empty() {
+        buffer.push_str("**最近 5 分钟 K 线（旧→新）：**\n");
         buffer.push_str("日期 | 开盘价 | 高价 | 低价 | 收盘价 | 成交量\n");
         buffer.push_str("--- | --- | --- | --- | --- | ---\n");
-        for candle in &entry.recent_candles_3m {
+        for candle in &entry.recent_candles_5m {
             let timestamp = format_kline_timestamp(candle.timestamp_ms, timezone);
             buffer.push_str(&format!(
                 " {} | {} | {} | {} | {} | {}\n",
@@ -1236,8 +1236,7 @@ fn format_series(values: &[f64]) -> String {
 }
 
 fn format_kline_timestamp(timestamp_ms: i64, timezone: ConfiguredTimeZone) -> String {
-    format_timestamp_label(Some(timestamp_ms), timezone)
-        .unwrap_or_else(|| timestamp_ms.to_string())
+    format_timestamp_label(Some(timestamp_ms), timezone).unwrap_or_else(|| timestamp_ms.to_string())
 }
 
 fn format_position(position: &PositionInfo, timezone: ConfiguredTimeZone) -> String {
@@ -1325,10 +1324,7 @@ fn format_balance(balance: &AccountBalanceDelta) -> String {
     segments.join(" · ")
 }
 
-fn format_timestamp_label(
-    timestamp: Option<i64>,
-    timezone: ConfiguredTimeZone,
-) -> Option<String> {
+fn format_timestamp_label(timestamp: Option<i64>, timezone: ConfiguredTimeZone) -> Option<String> {
     timestamp.and_then(|ts| timezone.format_timestamp(ts, "%Y-%m-%d %H:%M:%S"))
 }
 
