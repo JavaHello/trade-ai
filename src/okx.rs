@@ -1943,15 +1943,16 @@ async fn build_pending_order_from_algo(entry: OkxPendingAlgoOrderEntry) -> Pendi
     let price = parse_optional_float(
         entry
             .tp_ord_px
-            .clone()
-            .or(entry.sl_ord_px.clone())
+            .filter(|s| !s.trim().is_empty())
+            .or(entry.sl_ord_px.clone().filter(|s| !s.trim().is_empty()))
             .or(entry.order_px.clone()),
     );
     let trigger_price = parse_optional_float(
         entry
             .tp_trigger_px
             .clone()
-            .or(entry.sl_trigger_px.clone())
+            .filter(|s| !s.trim().is_empty())
+            .or(entry.sl_trigger_px.clone().filter(|s| !s.trim().is_empty()))
             .or(entry.trigger_px.clone()),
     );
     let reduce_only = parse_bool_flag(&entry.reduce_only);
