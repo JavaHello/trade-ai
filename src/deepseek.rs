@@ -860,6 +860,12 @@ fn build_snapshot_prompt(
     timezone: ConfiguredTimeZone,
 ) -> String {
     let mut buffer = String::new();
+    buffer.push_str(&format!(
+        "当前时间: {}\n",
+        timezone
+            .format_timestamp(Local::now().timestamp_millis(), "%Y-%m-%d %H:%M:%S")
+            .unwrap_or_else(|| "未知".to_string())
+    ));
     buffer.push_str("以下为 OKX 账户的实时快照，请据此输出风险与操作建议：\n\n");
 
     if let Some(eq) = snapshot.balance.total_equity {
@@ -1190,8 +1196,10 @@ fn append_recent_kline_table(
 ) {
     if !recent_candles.is_empty() {
         buffer.push_str(&format!("### **最近 {} K 线（旧→新）：**\n\n", m));
-        buffer.push_str("| 日期                | 开盘价 | 高价   | 低价   | 收盘价 | 成交量     |\n");
-        buffer.push_str("| ------------------- | ------ | ------ | ------ | ------ | ---------- |\n");
+        buffer
+            .push_str("| 日期                | 开盘价 | 高价   | 低价   | 收盘价 | 成交量     |\n");
+        buffer
+            .push_str("| ------------------- | ------ | ------ | ------ | ------ | ---------- |\n");
         for candle in recent_candles {
             let timestamp = format_kline_timestamp(candle.timestamp_ms, timezone);
             buffer.push_str(&format!(
