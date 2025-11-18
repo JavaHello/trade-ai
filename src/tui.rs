@@ -2012,10 +2012,14 @@ impl TuiApp {
         let ordinal_label = ordinal.to_string();
         match &entry.event {
             TradeEvent::Order(response) => {
-                let side_label = Self::side_short_label(response.side).to_string();
+                let mut side_label = Self::side_short_label(response.side).to_string();
                 let size_label = self.format_contract_size(&response.inst_id, response.size);
                 let price_label = self.format_price_for(&response.inst_id, response.price);
                 let status_color = Self::status_color(response.success);
+                let order_type = Self::order_kind_label(response.kind);
+                if let Some(kind_label) = order_type {
+                    side_label = format!("{}({})", side_label, kind_label);
+                }
                 vec![
                     (ordinal_label, ColumnAlign::Right, 5, None),
                     (time, ColumnAlign::Left, 8, None),
@@ -2126,6 +2130,14 @@ impl TuiApp {
 
     fn status_label(success: bool) -> &'static str {
         if success { "成功" } else { "失败" }
+    }
+
+    fn order_kind_label(kind: TradeOrderKind) -> Option<&'static str> {
+        match kind {
+            TradeOrderKind::TakeProfit => Some("止盈"),
+            TradeOrderKind::StopLoss => Some("止损"),
+            TradeOrderKind::Regular => None,
+        }
     }
 
     fn exec_type_label(exec_type: Option<&str>) -> &'static str {
@@ -2526,6 +2538,9 @@ impl TuiApp {
                     Self::side_label(response.side),
                     self.format_contract_size(&response.inst_id, response.size),
                 )));
+                if let Some(kind_label) = Self::order_kind_label(response.kind) {
+                    lines.push(Line::from(format!("类型 {kind_label}委托")));
+                }
                 lines.push(Line::from(format!(
                     "价格 {}",
                     self.format_price_for(&response.inst_id, response.price),
