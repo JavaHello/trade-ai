@@ -1335,6 +1335,13 @@ fn format_order(order: &PendingOrderInfo, timezone: ConfiguredTimeZone) -> Strin
     if let Some(pos_side) = &order.pos_side {
         segments.push(format!("方向 {}", pos_side));
     }
+    if let Some(tag) = &order.tag {
+        if tag.eq_ignore_ascii_case(AI_TAG_TAKE_PROFIT) {
+            segments.push("止盈单".to_string());
+        } else if tag.eq_ignore_ascii_case(AI_TAG_STOP_LOSS) {
+            segments.push("止损单".to_string());
+        }
+    }
     if let Some(value) = trigger {
         segments.push(value);
     }
