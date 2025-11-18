@@ -90,6 +90,7 @@ async fn main() -> Result<(), anyhow::Error> {
         let deepseek_start_ms = run_start_timestamp_ms;
         let deepseek_tx = tx.clone();
         let ai_order_tx = order_tx.clone();
+        let deepseek_timezone = timezone;
         task::spawn(async move {
             match okx::fetch_market_info(&td_mode, &market_cfg, &inst_ids).await {
                 Ok(markets) => {
@@ -104,6 +105,7 @@ async fn main() -> Result<(), anyhow::Error> {
                             markets,
                             deepseek_start_ms,
                             ai_order_tx,
+                            deepseek_timezone,
                         ) {
                             Ok(reporter) => {
                                 let exit_rx = deepseek_tx.subscribe();

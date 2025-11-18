@@ -14,7 +14,7 @@ use crate::command::{
     SetLeverageRequest, TradeEvent, TradeOperator, TradeOrderKind, TradeRequest, TradeSide,
     TradingCommand,
 };
-use crate::config::DeepseekConfig;
+use crate::config::{ConfiguredTimeZone, DeepseekConfig};
 use crate::error_log::ErrorLogStore;
 use crate::okx::{MarketInfo, SharedAccountState};
 use crate::okx_analytics::{InstrumentAnalytics, MarketDataFetcher};
@@ -45,6 +45,7 @@ pub struct DeepseekReporter {
     order_tx: Option<mpsc::Sender<TradingCommand>>,
     error_log: ErrorLogStore,
     system_prompt: String,
+    timezone: ConfiguredTimeZone,
 }
 
 impl DeepseekReporter {
@@ -56,6 +57,7 @@ impl DeepseekReporter {
         markets: HashMap<String, MarketInfo>,
         start_timestamp_ms: i64,
         order_tx: Option<mpsc::Sender<TradingCommand>>,
+        timezone: ConfiguredTimeZone,
     ) -> Result<Self> {
         let system_prompt = load_system_prompt()?;
         let client = DeepseekClient::new(&config, system_prompt.clone())?;
@@ -77,6 +79,7 @@ impl DeepseekReporter {
             order_tx,
             error_log,
             system_prompt,
+            timezone,
         })
     }
 
@@ -137,6 +140,7 @@ impl DeepseekReporter {
             &self.inst_ids,
             &self.markets,
             &leverage_overview,
+            self.timezone,
         );
         let insight = self.client.chat_completion(&prompt).await?;
         let trimmed = insight.trim();
@@ -853,6 +857,7 @@ fn build_snapshot_prompt(
     inst_ids: &[String],
     markets: &HashMap<String, MarketInfo>,
     leverages: &[InstrumentLeverage],
+    timezone: ConfiguredTimeZone,
 ) -> String {
     let mut buffer = String::new();
     buffer.push_str("以下为 OKX 账户的实时快照，请据此输出风险与操作建议：\n\n");
@@ -881,7 +886,7 @@ fn build_snapshot_prompt(
     } else {
         for position in snapshot.positions.iter().take(MAX_POSITIONS) {
             buffer.push_str("- ");
-            buffer.push_str(&format_position(position));
+            buffer.push_str(&format_position(position, timezone));
             buffer.push('\n');
         }
         if snapshot.positions.len() > MAX_POSITIONS {
@@ -898,7 +903,7 @@ fn build_snapshot_prompt(
     } else {
         for order in snapshot.open_orders.iter().take(MAX_ORDERS) {
             buffer.push_str("- ");
-            buffer.push_str(&format_order(order));
+            buffer.push_str(&format_order(order, timezone));
             buffer.push('\n');
         }
         if snapshot.open_orders.len() > MAX_ORDERS {
@@ -928,7 +933,7 @@ fn build_snapshot_prompt(
 
     append_trade_limits(&mut buffer, inst_ids, markets, analytics);
     append_leverage_settings(&mut buffer, leverages);
-    append_market_analytics(&mut buffer, analytics);
+    append_market_analytics(&mut buffer, analytics, timezone);
 
     buffer
 }
@@ -1089,7 +1094,11 @@ fn is_usdt_quote(inst_id: &str) -> bool {
     upper.ends_with("-USDT") || upper.contains("-USDT-")
 }
 
-fn append_market_analytics(buffer: &mut String, analytics: &[InstrumentAnalytics]) {
+fn append_market_analytics(
+    buffer: &mut String,
+    analytics: &[InstrumentAnalytics],
+    timezone: ConfiguredTimeZone,
+) {
     if analytics.is_empty() {
         return;
     }
@@ -1168,6 +1177,48 @@ fn append_market_analytics(buffer: &mut String, analytics: &[InstrumentAnalytics
             "RSI 指标（14 周期，4 小时）：{}\n",
             format_series(&entry.swing_rsi14)
         ));
+        append_recent_kline_table(buffer, entry, timezone);
+    }
+}
+
+fn append_recent_kline_table(
+    buffer: &mut String,
+    entry: &InstrumentAnalytics,
+    timezone: ConfiguredTimeZone,
+) {
+    if !entry.recent_candles_3m.is_empty() {
+        buffer.push_str("**最近 3 分钟 K 线（旧→新）：**\n");
+        buffer.push_str("日期 | 开盘价 | 高价 | 低价 | 收盘价 | 成交量\n");
+        buffer.push_str("--- | --- | --- | --- | --- | ---\n");
+        for candle in &entry.recent_candles_3m {
+            let timestamp = format_kline_timestamp(candle.timestamp_ms, timezone);
+            buffer.push_str(&format!(
+                " {} | {} | {} | {} | {} | {}\n",
+                timestamp,
+                format_float(candle.open),
+                format_float(candle.high),
+                format_float(candle.low),
+                format_float(candle.close),
+                format_float(candle.volume)
+            ));
+        }
+    }
+    if !entry.recent_candles_4h.is_empty() {
+        buffer.push_str("**最近 4 小时 K 线（旧→新）：**\n");
+        buffer.push_str("日期 | 开盘价 | 高价 | 低价 | 收盘价 | 成交量\n");
+        buffer.push_str("--- | --- | --- | --- | --- | ---\n");
+        for candle in &entry.recent_candles_4h {
+            let timestamp = format_kline_timestamp(candle.timestamp_ms, timezone);
+            buffer.push_str(&format!(
+                " {} | {} | {} | {} | {} | {}\n",
+                timestamp,
+                format_float(candle.open),
+                format_float(candle.high),
+                format_float(candle.low),
+                format_float(candle.close),
+                format_float(candle.volume)
+            ));
+        }
     }
 }
 
@@ -1184,7 +1235,12 @@ fn format_series(values: &[f64]) -> String {
     }
 }
 
-fn format_position(position: &PositionInfo) -> String {
+fn format_kline_timestamp(timestamp_ms: i64, timezone: ConfiguredTimeZone) -> String {
+    format_timestamp_label(Some(timestamp_ms), timezone)
+        .unwrap_or_else(|| timestamp_ms.to_string())
+}
+
+fn format_position(position: &PositionInfo, timezone: ConfiguredTimeZone) -> String {
     let side = position
         .pos_side
         .as_deref()
@@ -1211,14 +1267,14 @@ fn format_position(position: &PositionInfo) -> String {
     if let Some(value) = gear {
         segments.push(format!("杠杆 {}", value));
     }
-    if let Some(timestamp) = format_timestamp_label(position.create_time) {
+    if let Some(timestamp) = format_timestamp_label(position.create_time, timezone) {
         segments.push(format!("建仓 {}", timestamp));
     }
     segments.push(format!("保证金 {}", format_float(position.imr)));
     segments.join(" · ")
 }
 
-fn format_order(order: &PendingOrderInfo) -> String {
+fn format_order(order: &PendingOrderInfo, timezone: ConfiguredTimeZone) -> String {
     let trigger = order
         .trigger_price
         .map(|price| format!("触发 {}", format_float(price)));
@@ -1248,7 +1304,7 @@ fn format_order(order: &PendingOrderInfo) -> String {
     if order.reduce_only {
         segments.push("只减仓".to_string());
     }
-    if let Some(timestamp) = format_timestamp_label(order.create_time) {
+    if let Some(timestamp) = format_timestamp_label(order.create_time, timezone) {
         segments.push(format!("创建 {}", timestamp));
     }
     segments.join(" · ")
@@ -1269,10 +1325,11 @@ fn format_balance(balance: &AccountBalanceDelta) -> String {
     segments.join(" · ")
 }
 
-fn format_timestamp_label(timestamp: Option<i64>) -> Option<String> {
-    timestamp
-        .and_then(|ts| Local.timestamp_millis_opt(ts).single())
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+fn format_timestamp_label(
+    timestamp: Option<i64>,
+    timezone: ConfiguredTimeZone,
+) -> Option<String> {
+    timestamp.and_then(|ts| timezone.format_timestamp(ts, "%Y-%m-%d %H:%M:%S"))
 }
 
 fn format_float(value: f64) -> String {

@@ -12,6 +12,7 @@ const OPEN_INTEREST_HISTORY_ENDPOINT: &str =
 const ANALYTICS_INTRADAY_LIMIT: usize = 160;
 const ANALYTICS_SWING_LIMIT: usize = 120;
 const ANALYTICS_SERIES_TAIL: usize = 20;
+const RECENT_KLINE_TAIL: usize = 20;
 const EMA_SHORT_PERIOD: usize = 20;
 const EMA_LONG_PERIOD: usize = 50;
 const RSI_SHORT_PERIOD: usize = 7;
@@ -46,6 +47,18 @@ pub struct InstrumentAnalytics {
     pub swing_volume_avg: Option<f64>,
     pub swing_macd: Vec<f64>,
     pub swing_rsi14: Vec<f64>,
+    pub recent_candles_3m: Vec<KlineRecord>,
+    pub recent_candles_4h: Vec<KlineRecord>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct KlineRecord {
+    pub timestamp_ms: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -119,6 +132,8 @@ impl MarketDataFetcher {
             swing_volume_avg,
             swing_macd: take_tail(&macd_swing, ANALYTICS_SERIES_TAIL),
             swing_rsi14: take_tail(&rsi14_swing, ANALYTICS_SERIES_TAIL),
+            recent_candles_3m: take_tail_candles(&intraday, RECENT_KLINE_TAIL),
+            recent_candles_4h: take_tail_candles(&swing, RECENT_KLINE_TAIL),
         })
     }
 
@@ -253,6 +268,7 @@ impl MarketDataFetcher {
 #[derive(Debug, Clone)]
 struct Candle {
     ts: i64,
+    open: f64,
     high: f64,
     low: f64,
     close: f64,
@@ -266,6 +282,7 @@ impl Candle {
         }
         Some(Candle {
             ts: entry.get(0)?.parse().ok()?,
+            open: parse_f64(entry.get(1)?)?,
             high: parse_f64(entry.get(2)?)?,
             low: parse_f64(entry.get(3)?)?,
             close: parse_f64(entry.get(4)?)?,
@@ -325,6 +342,24 @@ fn take_tail(values: &[f64], count: usize) -> Vec<f64> {
     } else {
         values[values.len() - count..].to_vec()
     }
+}
+
+fn take_tail_candles(candles: &[Candle], count: usize) -> Vec<KlineRecord> {
+    if count == 0 || candles.is_empty() {
+        return Vec::new();
+    }
+    let start = candles.len().saturating_sub(count);
+    candles[start..]
+        .iter()
+        .map(|candle| KlineRecord {
+            timestamp_ms: candle.ts,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+            volume: candle.volume,
+        })
+        .collect()
 }
 
 fn average_tail(values: &[f64], period: usize) -> Option<f64> {
