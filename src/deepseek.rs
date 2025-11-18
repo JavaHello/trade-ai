@@ -17,7 +17,7 @@ use crate::command::{
 use crate::config::{ConfiguredTimeZone, DeepseekConfig};
 use crate::error_log::ErrorLogStore;
 use crate::okx::{MarketInfo, SharedAccountState};
-use crate::okx_analytics::{InstrumentAnalytics, MarketDataFetcher};
+use crate::okx_analytics::{InstrumentAnalytics, KlineRecord, MarketDataFetcher};
 use crate::trade_log::{TradeLogEntry, TradeLogStore};
 
 const SYSTEM_PROMPT_PATH: &str = "prompt/system.md";
@@ -867,7 +867,7 @@ fn build_snapshot_prompt(
     }
 
     if let Some(summary) = performance {
-        buffer.push_str("\n【策略运行概览】\n");
+        buffer.push_str("\n#【策略运行概览】\n");
         if let Some(overall) = &summary.overall {
             push_performance_stats(&mut buffer, overall);
         } else {
@@ -880,7 +880,7 @@ fn build_snapshot_prompt(
         }
     }
 
-    buffer.push_str("\n【持仓情况】\n");
+    buffer.push_str("\n#【持仓情况】\n");
     if snapshot.positions.is_empty() {
         buffer.push_str("无持仓\n");
     } else {
@@ -897,7 +897,7 @@ fn build_snapshot_prompt(
         }
     }
 
-    buffer.push_str("\n【挂单情况】\n");
+    buffer.push_str("\n#【挂单情况】\n");
     if snapshot.open_orders.is_empty() {
         buffer.push_str("无挂单\n");
     } else {
@@ -914,7 +914,7 @@ fn build_snapshot_prompt(
         }
     }
 
-    buffer.push_str("\n【资金币种】\n");
+    buffer.push_str("\n#【资金币种】\n");
     if snapshot.balance.delta.is_empty() {
         buffer.push_str("无资金明细\n");
     } else {
@@ -979,7 +979,7 @@ fn append_trade_limits(
             continue;
         };
         if !appended {
-            buffer.push_str("\n【最小交易金额】\n");
+            buffer.push_str("\n#【最小交易金额】\n");
             appended = true;
         }
         let price = price_lookup.get(&inst_id.to_ascii_uppercase()).copied();
@@ -993,7 +993,7 @@ fn append_leverage_settings(buffer: &mut String, leverages: &[InstrumentLeverage
     if leverages.is_empty() {
         return;
     }
-    buffer.push_str("\n【杠杆设置】\n");
+    buffer.push_str("\n#【杠杆设置】\n");
     for entry in leverages {
         buffer.push_str("- ");
         buffer.push_str(&format_leverage_entry(entry));
@@ -1102,10 +1102,10 @@ fn append_market_analytics(
     if analytics.is_empty() {
         return;
     }
-    buffer.push_str("\n【市场技术指标】\n");
+    buffer.push_str("\n#【市场技术指标】\n");
     for entry in analytics {
         buffer.push_str(&format!("\n## {} ({})\n", entry.symbol, entry.inst_id));
-        buffer.push_str("**当前价格**\n");
+        buffer.push_str("\n### **当前价格**\n");
         buffer.push_str(&format!(
             "- current_price = {}\n",
             optional_float(entry.current_price)
@@ -1122,7 +1122,7 @@ fn append_market_analytics(
             "- current_rsi (7周期) = {}\n",
             optional_float(entry.current_rsi7)
         ));
-        buffer.push_str("**永续合约指标：**\n");
+        buffer.push_str("\n### **永续合约指标：**\n");
         buffer.push_str(&format!(
             "- 未平仓合约：最新：{} | 平均值：{}\n",
             optional_float(entry.oi_latest),
@@ -1132,85 +1132,70 @@ fn append_market_analytics(
             "- 资金费率：{}\n",
             optional_float(entry.funding_rate)
         ));
-        buffer.push_str("**日内走势（5分钟间隔，最早→最新）：**\n");
+        append_recent_kline_table(buffer, &entry.recent_candles_5m, "5m", timezone);
+        buffer.push_str("\n### **日内走势（5分钟间隔，最早→最新）：**\n");
         buffer.push_str(&format!(
-            "中间价：{}\n",
+            "- 中间价：{}\n",
             format_series(&entry.intraday_prices)
         ));
         buffer.push_str(&format!(
-            "EMA指标（20周期）：{}\n",
+            "- EMA指标（20周期）：{}\n",
             format_series(&entry.intraday_ema20)
         ));
         buffer.push_str(&format!(
-            "MACD指标：{}\n",
+            "- MACD指标：{}\n",
             format_series(&entry.intraday_macd)
         ));
         buffer.push_str(&format!(
-            "RSI指标（7周期）：{}\n",
+            "- RSI指标（7周期）：{}\n",
             format_series(&entry.intraday_rsi7)
         ));
         buffer.push_str(&format!(
-            "RSI指标（14周期）：{}\n",
+            "- RSI指标（14周期）：{}\n",
             format_series(&entry.intraday_rsi14)
         ));
-        buffer.push_str("**长期走势（4小时图）：**\n");
+        append_recent_kline_table(buffer, &entry.recent_candles_4h, "4h", timezone);
+        buffer.push_str("\n### **长期走势（4小时图）：**\n");
         buffer.push_str(&format!(
-            "20周期EMA：{} vs. 50周期EMA：{}\n",
+            "- 20周期EMA：{} vs. 50周期EMA：{}\n",
             optional_float(entry.swing_ema20),
             optional_float(entry.swing_ema50)
         ));
         buffer.push_str(&format!(
-            "3周期ATR： {} 与 14 周期 ATR 对比：{}\n",
+            "- 3周期ATR： {} 与 14 周期 ATR 对比：{}\n",
             optional_float(entry.swing_atr3),
             optional_float(entry.swing_atr14)
         ));
         buffer.push_str(&format!(
-            "当前成交量：{} 与平均成交量对比：{}\n",
+            "- 当前成交量：{} 与平均成交量对比：{}\n",
             optional_float(entry.swing_volume_current),
             optional_float(entry.swing_volume_avg)
         ));
         buffer.push_str(&format!(
-            "MACD 指标（4 小时）：{}\n",
+            "- MACD 指标（4 小时）：{}\n",
             format_series(&entry.swing_macd)
         ));
         buffer.push_str(&format!(
-            "RSI 指标（14 周期，4 小时）：{}\n",
+            "- RSI 指标（14 周期，4 小时）：{}\n",
             format_series(&entry.swing_rsi14)
         ));
-        append_recent_kline_table(buffer, entry, timezone);
     }
 }
 
 fn append_recent_kline_table(
     buffer: &mut String,
-    entry: &InstrumentAnalytics,
+    recent_candles: &Vec<KlineRecord>,
+    m: &str,
     timezone: ConfiguredTimeZone,
 ) {
-    if !entry.recent_candles_5m.is_empty() {
-        buffer.push_str("**最近 5 分钟 K 线（旧→新）：**\n");
-        buffer.push_str("日期 | 开盘价 | 高价 | 低价 | 收盘价 | 成交量\n");
-        buffer.push_str("--- | --- | --- | --- | --- | ---\n");
-        for candle in &entry.recent_candles_5m {
+    if !recent_candles.is_empty() {
+        buffer.push_str(&format!("### **最近 {} K 线（旧→新）：**\n\n", m));
+        buffer.push_str("| 日期                | 开盘价 | 高价   | 低价   | 收盘价 | 成交量     |\n");
+        buffer.push_str("| ------------------- | ------ | ------ | ------ | ------ | ---------- |\n");
+        for candle in recent_candles {
             let timestamp = format_kline_timestamp(candle.timestamp_ms, timezone);
             buffer.push_str(&format!(
-                " {} | {} | {} | {} | {} | {}\n",
-                timestamp,
-                format_float(candle.open),
-                format_float(candle.high),
-                format_float(candle.low),
-                format_float(candle.close),
-                format_float(candle.volume)
-            ));
-        }
-    }
-    if !entry.recent_candles_4h.is_empty() {
-        buffer.push_str("**最近 4 小时 K 线（旧→新）：**\n");
-        buffer.push_str("日期 | 开盘价 | 高价 | 低价 | 收盘价 | 成交量\n");
-        buffer.push_str("--- | --- | --- | --- | --- | ---\n");
-        for candle in &entry.recent_candles_4h {
-            let timestamp = format_kline_timestamp(candle.timestamp_ms, timezone);
-            buffer.push_str(&format!(
-                " {} | {} | {} | {} | {} | {}\n",
+                "| {} | {} | {} | {} | {} | {} |\n",
                 timestamp,
                 format_float(candle.open),
                 format_float(candle.high),
