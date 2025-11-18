@@ -84,20 +84,18 @@ impl DeepseekReporter {
         })
     }
 
-    pub async fn run(self, mut exit_rx: broadcast::Receiver<Command>) -> Result<()> {
+    pub async fn run(self, mut exit_rx: broadcast::Receiver<()>) -> Result<()> {
         loop {
             let delay = self.random_dispatch_delay();
-            let sleep = time::sleep(delay);
-            tokio::pin!(sleep);
             tokio::select! {
-                _ = &mut sleep => {
+                _ = time::sleep(delay) => {
                     if let Err(err) = self.report_once().await {
                         let _ = self.tx.send(Command::Error(format!("Deepseek 分析失败: {err}")));
                     }
                 }
                 message = exit_rx.recv() => match message {
-                    Ok(Command::Exit) | Err(broadcast::error::RecvError::Closed) => break,
-                    _ => {}
+                    Ok(_) | Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 }
             }
         }
@@ -105,13 +103,8 @@ impl DeepseekReporter {
     }
 
     fn random_dispatch_delay(&self) -> Duration {
-        let min_delay = Duration::from_secs(60);
-        let max_dispatch = self.interval.min(Duration::from_secs(5 * 60));
-        if max_dispatch <= min_delay {
-            return max_dispatch;
-        }
-        let min_secs = min_delay.as_secs();
-        let max_secs = max_dispatch.as_secs();
+        let min_secs = 60;
+        let max_secs = self.interval.as_secs().max(min_secs);
         let mut rng = rand::rng();
         let seconds = rng.random_range(min_secs..=max_secs);
         Duration::from_secs(seconds)

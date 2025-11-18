@@ -7,35 +7,43 @@ use crate::command::Command;
 
 pub struct OsNotification {
     pub rx: broadcast::Receiver<Command>,
+    exit_rx: broadcast::Receiver<()>,
     interval: Duration,
 }
 
 impl OsNotification {
-    pub fn new(rx: broadcast::Receiver<Command>) -> OsNotification {
+    pub fn new(
+        rx: broadcast::Receiver<Command>,
+        exit_rx: broadcast::Receiver<()>,
+    ) -> OsNotification {
         OsNotification {
             rx,
+            exit_rx,
             interval: Duration::from_secs(10),
         }
     }
     pub async fn run(&mut self) -> Result<(), anyhow::Error> {
         let mut start = tokio::time::Instant::now();
+        let rx = &mut self.rx;
+        let exit_rx = &mut self.exit_rx;
         loop {
-            match self.rx.recv().await {
-                Ok(message) => match message {
-                    Command::Notify(inst_id, msg) => {
+            tokio::select! {
+                result = rx.recv() => match result {
+                    Ok(Command::Notify(inst_id, msg)) => {
                         if start.elapsed() <= self.interval {
                             continue;
                         }
                         terminal_notify(&inst_id, &msg)?;
                         start = tokio::time::Instant::now();
                     }
-                    Command::Exit => {
-                        return Ok(());
-                    }
-                    _ => {}
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
                 },
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+                signal = exit_rx.recv() => match signal {
+                    Ok(_) | Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                }
             }
         }
         Ok(())

@@ -13,7 +13,6 @@ pub enum Command {
     TradeResult(TradeEvent),
     AccountSnapshot(AccountSnapshot),
     MarketsLoaded(HashMap<String, MarketInfo>),
-    Exit,
 }
 
 #[derive(Debug, Clone)]

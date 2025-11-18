@@ -35,21 +35,28 @@ async fn main() -> Result<(), anyhow::Error> {
     let timezone = run_config.timezone();
     let deepseek_cfg = param.deepseek_config();
     let (tx, mut rx) = broadcast::channel::<Command>(16);
+    let (exit_tx, _exit_rx) = broadcast::channel::<()>(1);
     {
         let mut error_rx = tx.subscribe();
+        let mut exit_rx = exit_tx.subscribe();
         let error_log_store = ErrorLogStore::new(ErrorLogStore::default_path());
         task::spawn(async move {
             loop {
-                match error_rx.recv().await {
-                    Ok(Command::Error(message)) => {
-                        if let Err(err) = error_log_store.append_message(message) {
-                            eprintln!("failed to persist error log: {err}");
+                tokio::select! {
+                    message = error_rx.recv() => match message {
+                        Ok(Command::Error(message)) => {
+                            if let Err(err) = error_log_store.append_message(message) {
+                                eprintln!("failed to persist error log: {err}");
+                            }
                         }
+                        Ok(_) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    },
+                    signal = exit_rx.recv() => match signal {
+                        Ok(_) | Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     }
-                    Ok(Command::Exit) => break,
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 }
             }
         });
@@ -91,6 +98,7 @@ async fn main() -> Result<(), anyhow::Error> {
         let deepseek_tx = tx.clone();
         let ai_order_tx = order_tx.clone();
         let deepseek_timezone = timezone;
+        let deepseek_exit_tx = exit_tx.clone();
         task::spawn(async move {
             match okx::fetch_market_info(&td_mode, &market_cfg, &inst_ids).await {
                 Ok(markets) => {
@@ -108,10 +116,11 @@ async fn main() -> Result<(), anyhow::Error> {
                             deepseek_timezone,
                         ) {
                             Ok(reporter) => {
-                                let exit_rx = deepseek_tx.subscribe();
+                                let exit_rx = deepseek_exit_tx.subscribe();
+                                let reporting_tx = deepseek_tx.clone();
                                 task::spawn(async move {
                                     if let Err(err) = reporter.run(exit_rx).await {
-                                        let _ = deepseek_tx.send(Command::Error(format!(
+                                        let _ = reporting_tx.send(Command::Error(format!(
                                             "Deepseek reporter error: {err}"
                                         )));
                                     }
@@ -199,17 +208,20 @@ async fn main() -> Result<(), anyhow::Error> {
     });
     let nrx = tx.subscribe();
     let notify_tx = tx.clone();
+    let notify_exit_rx = exit_tx.subscribe();
     task::spawn(async move {
-        if let Err(err) = OsNotification::new(nrx).run().await {
+        let mut notifier = OsNotification::new(nrx, notify_exit_rx);
+        if let Err(err) = notifier.run().await {
             let _ = notify_tx.send(Command::Error(format!("notification error: {err}")));
         }
     });
     let monitor_error_tx = tx.clone();
     let mtx = tx.clone();
     let mrx = tx.subscribe();
+    let monitor_exit_rx = exit_tx.subscribe();
     let thresholds = param.threshold_map();
     task::spawn(async move {
-        let mut monitor = monitor::Monitor::new(thresholds, mtx, mrx);
+        let mut monitor = monitor::Monitor::new(thresholds, mtx, mrx, monitor_exit_rx);
         if let Err(err) = monitor.run().await {
             let _ = monitor_error_tx.send(Command::Error(format!("monitor error: {err}")));
         }
@@ -229,11 +241,12 @@ async fn main() -> Result<(), anyhow::Error> {
     if !history_points.is_empty() {
         app.preload_history(&history_points);
     }
+    let mut app_exit_rx = exit_tx.subscribe();
     let app_result = tokio::select! {
-        result = app.run(&mut rx) => result,
+        result = app.run(&mut rx, &mut app_exit_rx) => result,
         _ = tokio::signal::ctrl_c() => Ok(()),
     };
-    let _ = tx.send(Command::Exit);
+    let _ = exit_tx.send(());
     app.dispose();
     app_result.map_err(|err| anyhow!(err.to_string()))?;
     Ok(())

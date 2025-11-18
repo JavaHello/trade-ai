@@ -1092,7 +1092,11 @@ impl TuiApp {
         }
     }
 
-    pub async fn run(&mut self, rx: &mut broadcast::Receiver<Command>) -> Result<()> {
+    pub async fn run(
+        &mut self,
+        rx: &mut broadcast::Receiver<Command>,
+        exit_rx: &mut broadcast::Receiver<()>,
+    ) -> Result<()> {
         color_eyre::install()?;
         let mut terminal = ratatui::init();
         let mut input_tick = tokio::time::interval(self.min_redraw_gap);
@@ -1210,12 +1214,15 @@ impl TuiApp {
                             terminal.draw(|frame| self.render(frame))?;
                             self.last_draw = Instant::now();
                         }
-                        Ok(Command::Exit) => {
-                            return Ok(());
-                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     }
+                }
+                signal = exit_rx.recv() => match signal {
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Ok(())
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 }
             }
         }

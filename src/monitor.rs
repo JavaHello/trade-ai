@@ -6,6 +6,7 @@ pub struct Monitor {
     pub thresholds: HashMap<String, (f64, f64)>,
     pub tx: broadcast::Sender<crate::command::Command>,
     pub rx: broadcast::Receiver<crate::command::Command>,
+    exit_rx: broadcast::Receiver<()>,
     price_precision: HashMap<String, usize>,
 }
 
@@ -14,56 +15,63 @@ impl Monitor {
         thresholds: HashMap<String, (f64, f64)>,
         tx: broadcast::Sender<crate::command::Command>,
         rx: broadcast::Receiver<crate::command::Command>,
+        exit_rx: broadcast::Receiver<()>,
     ) -> Monitor {
         Monitor {
             thresholds,
             tx,
             rx,
+            exit_rx,
             price_precision: HashMap::new(),
         }
     }
 
     pub async fn run(&mut self) -> Result<(), anyhow::Error> {
         loop {
-            match self.rx.recv().await {
-                Ok(message) => match message {
-                    crate::command::Command::MarkPriceUpdate(
-                        inst_id,
-                        mark_price,
-                        _ts,
-                        precision,
-                    ) => {
-                        self.update_precision(&inst_id, precision);
-                        let (lower, upper) = self.threshold_for(&inst_id);
-                        if mark_price < lower {
-                            let notify_msg = format!(
-                                "{} mark price {} is below lower bound {}",
-                                inst_id,
-                                self.format_price(&inst_id, mark_price),
-                                self.format_price(&inst_id, lower)
-                            );
-                            let _ = self
-                                .tx
-                                .send(crate::command::Command::Notify(inst_id.clone(), notify_msg));
-                        } else if mark_price > upper {
-                            let notify_msg = format!(
-                                "{} mark price {} is above upper bound {}",
-                                inst_id,
-                                self.format_price(&inst_id, mark_price),
-                                self.format_price(&inst_id, upper)
-                            );
-                            let _ = self
-                                .tx
-                                .send(crate::command::Command::Notify(inst_id.clone(), notify_msg));
-                        }
+            enum Event {
+                Command(Result<crate::command::Command, broadcast::error::RecvError>),
+                Exit(Result<(), broadcast::error::RecvError>),
+            }
+            let event = tokio::select! {
+                message = self.rx.recv() => Event::Command(message),
+                signal = self.exit_rx.recv() => Event::Exit(signal),
+            };
+            match event {
+                Event::Command(Ok(crate::command::Command::MarkPriceUpdate(
+                    inst_id,
+                    mark_price,
+                    _ts,
+                    precision,
+                ))) => {
+                    self.update_precision(&inst_id, precision);
+                    let (lower, upper) = self.threshold_for(&inst_id);
+                    if mark_price < lower {
+                        let notify_msg = format!(
+                            "{} mark price {} is below lower bound {}",
+                            inst_id,
+                            self.format_price(&inst_id, mark_price),
+                            self.format_price(&inst_id, lower)
+                        );
+                        let _ = self
+                            .tx
+                            .send(crate::command::Command::Notify(inst_id.clone(), notify_msg));
+                    } else if mark_price > upper {
+                        let notify_msg = format!(
+                            "{} mark price {} is above upper bound {}",
+                            inst_id,
+                            self.format_price(&inst_id, mark_price),
+                            self.format_price(&inst_id, upper)
+                        );
+                        let _ = self
+                            .tx
+                            .send(crate::command::Command::Notify(inst_id.clone(), notify_msg));
                     }
-                    crate::command::Command::Exit => {
-                        break;
-                    }
-                    _ => {}
-                },
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+                }
+                Event::Command(Ok(_)) => {}
+                Event::Command(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Event::Command(Err(broadcast::error::RecvError::Closed)) => break,
+                Event::Exit(Ok(_)) | Event::Exit(Err(broadcast::error::RecvError::Closed)) => break,
+                Event::Exit(Err(broadcast::error::RecvError::Lagged(_))) => continue,
             }
         }
         Ok(())
