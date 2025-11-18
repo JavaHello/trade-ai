@@ -11,7 +11,7 @@ const OPEN_INTEREST_HISTORY_ENDPOINT: &str =
     "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history";
 const ANALYTICS_INTRADAY_LIMIT: usize = 160;
 const ANALYTICS_SWING_LIMIT: usize = 120;
-const ANALYTICS_SERIES_TAIL: usize = 10;
+const ANALYTICS_SERIES_TAIL: usize = 20;
 const EMA_SHORT_PERIOD: usize = 20;
 const EMA_LONG_PERIOD: usize = 50;
 const RSI_SHORT_PERIOD: usize = 7;
