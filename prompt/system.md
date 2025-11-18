@@ -139,6 +139,7 @@
 ### 输出验证规则
 
 - 非 hold 情况下：所有数字必须为正数
+- quantity：除信号为 “hold” 外，`quantity` 必须是 0.01 的整数倍（0.01 × n）
 - 多单(buy_to_enter) → 止盈高于开仓价，止损低于开仓价
 - 空单(sell_to_enter) → 止盈低于开仓价，止损高于开仓价
 - 说明文字 justification ≤ 500 字符
