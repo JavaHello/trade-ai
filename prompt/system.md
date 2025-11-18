@@ -15,7 +15,7 @@
 - **资产范围**：BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP,DOGE-USDT-SWAP,XRP-USDT-SWAP（永续合约）
 - **初始资金**：20 USDT
 - **市场时间**：24/7 不间断交易
-- **决策频率**：每 5 分钟一次（中低频交易）
+- **决策频率**：每 1-5 分钟一次（中低频交易）
 - **杠杆范围**：1x - 20x（根据信心谨慎使用）
 
 ## 交易机制 (Trading Mechanics)
