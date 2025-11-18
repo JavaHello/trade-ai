@@ -4,10 +4,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration as ChronoDuration, Local, TimeZone};
+use rand::Rng;
 use reqwest::{Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast, mpsc};
-use tokio::time::{self, MissedTickBehavior};
+use tokio::time;
 
 use crate::command::{
     AccountBalanceDelta, AccountSnapshot, AiInsightRecord, Command, PendingOrderInfo, PositionInfo,
@@ -84,11 +85,12 @@ impl DeepseekReporter {
     }
 
     pub async fn run(self, mut exit_rx: broadcast::Receiver<Command>) -> Result<()> {
-        let mut ticker = time::interval(self.interval);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
+            let delay = self.random_dispatch_delay();
+            let sleep = time::sleep(delay);
+            tokio::pin!(sleep);
             tokio::select! {
-                _ = ticker.tick() => {
+                _ = &mut sleep => {
                     if let Err(err) = self.report_once().await {
                         let _ = self.tx.send(Command::Error(format!("Deepseek 分析失败: {err}")));
                     }
@@ -100,6 +102,19 @@ impl DeepseekReporter {
             }
         }
         Ok(())
+    }
+
+    fn random_dispatch_delay(&self) -> Duration {
+        let min_delay = Duration::from_secs(60);
+        let max_dispatch = self.interval.min(Duration::from_secs(5 * 60));
+        if max_dispatch <= min_delay {
+            return max_dispatch;
+        }
+        let min_secs = min_delay.as_secs_f64();
+        let max_secs = max_dispatch.as_secs_f64();
+        let mut rng = rand::rng();
+        let seconds = rng.random_range(min_secs..=max_secs);
+        Duration::from_secs_f64(seconds)
     }
 
     async fn report_once(&self) -> Result<()> {
