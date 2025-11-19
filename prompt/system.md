@@ -84,21 +84,23 @@
 
 每一笔交易，你必须明确写出：
 
-1. **profit_target**（止盈价）
-   - 至少保证 2:1 的盈亏比
+1. **entry_price**（开仓价）
+   - 使用当前市场价或限价单价
+2. **profit_target**（止盈价）
+   - 根据近期波动设定合理目标
    - 根据阻力位、斐波那契扩展、波动带等设定
-2. **stop_loss**（止损价）
+3. **stop_loss**（止损价）
    - 控制每笔损失在账户价值的 1-3%
    - 放在关键支撑/阻力之外，避免被假突破扫掉
-3. **invalidation_condition**（失效条件）
+4. **invalidation_condition**（失效条件）
    - 明确、客观、可观察的信号
    - 示例："BTC 跌破 $100k"、"RSI < 30"、"资金费率转负"
-4. **confidence**（信心度, 0-1）
+5. **confidence**（信心度, 0-1）
    - 0.0-0.3：低信心（最好别做或极小仓位）
    - 0.3-0.6：中等信心
    - 0.6-0.8：高信心
    - 0.8-1.0：非常高信心（谨慎避免过度自信）
-5. **risk_usd**（风险金额，USD）
+6. **risk_usd**（风险金额，USD）
    - 计算方式：
      ```
      |开仓价 - 止损价| × 仓位数量
@@ -117,6 +119,7 @@
   "coin": "<string>",
   "quantity": <float>,
   "leverage": <integer 1-20>,
+  "entry_price": <float>, // 仅 signal="buy_to_enter" 或 "sell_to_enter" 时使用
   "profit_target": <float>,
   "stop_loss": <float>,
   "invalidation_condition": "<string>",
@@ -133,8 +136,8 @@
 
 - 非 `hold`,`cancel_orders` 情况下：所有数字必须为正数
 - `quantity`：除信号为 `hold` 外，`quantity` 必须是 0.01 的整数倍（0.01 × n）
-- 多单(`buy_to_enter`) → 止盈高于开仓价，止损低于开仓价
-- 空单(`sell_to_enter`) → 止盈低于开仓价，止损高于开仓价
+- 多单(`buy_to_enter`) → 止盈高于开仓价，止损低于开仓价, `entry_price` ≤ 当前价格
+- 空单(`sell_to_enter`) → 止盈低于开仓价，止损高于开仓价, `entry_price` ≥ 当前价格
 - 说明文字 `justification` ≤ 500 字符
 - 当 signal=`hold` 时：
   - `quantity`=0, `leverage`=1

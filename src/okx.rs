@@ -2840,7 +2840,8 @@ impl AccountState {
                     entry
                         .tp_trigger_px
                         .clone()
-                        .or(entry.sl_trigger_px.clone())
+                        .filter(|s| !s.trim().is_empty())
+                        .or(entry.sl_trigger_px.clone().filter(|s| !s.trim().is_empty()))
                         .or(entry.trigger_px.clone()),
                 );
                 let reduce_only = parse_bool_flag(&entry.reduce_only);
