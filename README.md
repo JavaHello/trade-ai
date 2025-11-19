@@ -14,8 +14,9 @@
 
 ## 环境要求
 
-- 已安装 Rust（建议 `rustup` + stable toolchain）
 - 能访问 OKX API（默认公开接口即可，无需 API Key）
+- 交易功能需 OKX 交易 API Key/Secret/Passphrase
+- 已安装 Rust（建议 `rustup` + stable toolchain） (\* 手动编译时需要)
 
 ## 运行配置（`config.json`）
 
