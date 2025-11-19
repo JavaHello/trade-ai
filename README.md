@@ -126,10 +126,8 @@ cargo run --release -- \
 ## 日志与数据持久化
 
 - `trade_logs.jsonl`：每次委托/撤单/成交都会记录一行 JSON，TUI 交易页的“成交日志”即来自此文件（最多加载 512 条）。
-- `ai_decisions.jsonl`：保存 Deepseek 系统提示、用户上下文、原始 JSON 响应及推断的操作结论。
+- `ai_decisions.jsonl`：保存 AI 系统提示词、用户上下文、原始 JSON 响应及推断的操作结论。
 - `error_logs.jsonl`：所有 `Command::Error` 信息都会落盘，方便后台运行时查因。
-
-删除这些文件不会影响其他状态，但会丢失历史记录。
 
 ## 常见问题
 
