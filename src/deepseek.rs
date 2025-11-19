@@ -917,14 +917,19 @@ fn build_snapshot_prompt(
             .format_timestamp(Local::now().timestamp_millis(), "%Y-%m-%d %H:%M:%S")
             .unwrap_or_else(|| "未知".to_string())
     ));
-    buffer.push_str("以下为 OKX 账户的实时快照，请据此输出风险与操作建议：\n\n");
+    buffer.push_str("下方为您提供各种状态数据、价格数据和预测信号，助您发掘超额收益。再下方是您当前的账户信息，包括账户价值、业绩、持仓等。\n\n");
+    buffer.push_str("⚠️ **重要提示：以下所有价格或信号数据均按时间顺序排列：最早 → 最新**\n\n");
+    buffer.push_str("**时间周期说明：**除非章节标题另有说明，否则日内数据以**5分钟为间隔**提供。如果某个币种使用不同的时间间隔，则会在该币种的章节中明确说明。\n\n");
 
-    if let Some(eq) = snapshot.balance.total_equity {
-        buffer.push_str(&format!("总权益: {}\n", format_float(eq)));
-    }
+    append_trade_limits(&mut buffer, inst_ids, markets, analytics);
+    append_leverage_settings(&mut buffer, leverages);
+    append_market_analytics(&mut buffer, analytics, timezone);
 
     if let Some(summary) = performance {
         buffer.push_str("\n#【策略运行概览】\n");
+        if let Some(eq) = snapshot.balance.total_equity {
+            buffer.push_str(&format!("总权益: {}\n", format_float(eq)));
+        }
         if let Some(overall) = &summary.overall {
             push_performance_stats(&mut buffer, overall);
         } else {
@@ -987,11 +992,7 @@ fn build_snapshot_prompt(
             ));
         }
     }
-
-    append_trade_limits(&mut buffer, inst_ids, markets, analytics);
-    append_leverage_settings(&mut buffer, leverages);
-    append_market_analytics(&mut buffer, analytics, timezone);
-
+    buffer.push_str("\n\n根据以上数据，请以要求的 JSON 格式提供您的交易决策。");
     buffer
 }
 
