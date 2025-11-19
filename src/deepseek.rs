@@ -401,7 +401,7 @@ impl DeepseekClient {
                     content: prompt.to_string(),
                 },
             ],
-            temperature: 0.3,
+            temperature: 0.0,
             response_format: Some(ResponseFormat {
                 r#type: "json_object".to_string(),
             }),

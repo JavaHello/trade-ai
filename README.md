@@ -6,17 +6,16 @@
 
 - 通过 OKX WebSocket 实时订阅合约 `mark-price`
 - 在 TUI 中绘制价格曲线并展示涨跌幅
-- 可选启用 Deepseek AI，周期性读取账户/技术指标并可自动生成交易指令
-   - 提示词来源: 基于 [nof1 ai 逆向](https://gist.github.com/wquguru/7d268099b8c04b7e5b6ad6fae922ae83) 修改
 - 预加载一定窗口的历史数据，方便刚启动时快速回看走势
 - 将成交明细、AI 决策、错误信息持久化到本地 JSONL 文件，TUI 交易页可随时回看
-- 在交易视图中可直接向 OKX 下单，指令会通过 Tokio channel 发送到 OKX 交易 API
+- 在交易视图中可直接向 OKX 下单，指令会发送到 OKX 交易 API
+- 可选启用 Deepseek AI，周期性读取账户/技术指标并可自动生成交易指令
+  - 提示词来源: 基于 [nof1 ai 逆向](https://gist.github.com/wquguru/7d268099b8c04b7e5b6ad6fae922ae83) 修改
 
 ## 环境要求
 
 - 已安装 Rust（建议 `rustup` + stable toolchain）
 - 能访问 OKX API（默认公开接口即可，无需 API Key）
-- 若需要桌面通知：macOS 需开启 `osascript` 权限，Linux 需 `notify-send/xdg-open`
 
 ## 运行配置（`config.json`）
 
@@ -29,7 +28,7 @@
 }
 ```
 
-- `start_timestamp_ms`：用于 Deepseek 策略统计与 TUI 中的“运行以来”指标，删除此文件可重新初始化。
+- `start_timestamp_ms`：用于策略统计与 TUI 中的“运行以来”指标，删除此文件可重新初始化。
 - `timezone`：控制 TUI 中的时间格式，支持 IANA 名称（`Asia/Shanghai`）或 `UTC+08:00`、`UTC-05:00` 等固定偏移。
 
 修改文件后重启程序即可生效；若字段缺失会回落到本地时区。
@@ -51,7 +50,7 @@ cargo run --release -- \
 默认为 `cross`(目前只支持 `cross`)。一旦配置完成，交易页面的委托将直接发送到 OKX
 实盘/模拟账户（取决于 API 权限），请谨慎操作。
 
-## Deepseek 智能分析
+## AI 智能分析
 
 在同时提供 OKX 与 Deepseek API 时，`trade-ai` 会按照设定频率（默认 3 分钟）执行以下流程：
 
@@ -68,7 +67,7 @@ OKX 客户端执行下列动作：
 - **平仓**：若信号为 `close`，会按持仓方向发送减仓单。
 - **杠杆同步**：若要求的杠杆与当前不符，会先发送 `SetLeverage`。
 
-所有 AI 请求/响应会写入 `ai_decisions.jsonl`，TUI 启动时会加载最近 512 条方便排查。
+所有 AI 请求/响应会写入 `ai_decisions.jsonl`，TUI 启动时会加载最近 64 条方便排查。
 若未提供 OKX API（即没有交易令牌），Deepseek 仍会给出文字分析，但不会触发任何下单操作。
 
 > ⚠️ Deepseek 具备实盘下单能力。请确认 API 权限、交易模式（实盘/模拟）和杠杆限制，必要时在 OKX 侧设置更细的
