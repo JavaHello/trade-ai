@@ -4,7 +4,7 @@ use std::fs;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, TimeZone};
 
-use crate::ai_decision::{AI_TAG_STOP_LOSS, AI_TAG_TAKE_PROFIT};
+use crate::ai_decision::{AI_TAG_CLOSE, AI_TAG_ENTRY, AI_TAG_STOP_LOSS, AI_TAG_TAKE_PROFIT};
 use crate::command::{AccountBalanceDelta, AccountSnapshot, PendingOrderInfo, PositionInfo};
 use crate::config::ConfiguredTimeZone;
 use crate::okx::MarketInfo;
@@ -487,6 +487,12 @@ fn format_order(order: &PendingOrderInfo, timezone: ConfiguredTimeZone) -> Strin
             segments.push("止盈单".to_string());
         } else if tag.eq_ignore_ascii_case(AI_TAG_STOP_LOSS) {
             segments.push("止损单".to_string());
+        } else if tag.eq_ignore_ascii_case(AI_TAG_ENTRY) {
+            segments.push("限价开仓".to_string());
+        } else if tag.eq_ignore_ascii_case(AI_TAG_CLOSE) {
+            segments.push("限价平仓".to_string());
+        } else {
+            segments.push(format!("标签 {}", tag));
         }
     }
     if let Some(value) = trigger {

@@ -1,9 +1,9 @@
+mod ai_decision;
 mod ai_log;
+mod ai_prompt;
 mod command;
 mod config;
 mod deepseek;
-mod ai_decision;
-mod ai_prompt;
 mod error_log;
 mod monitor;
 mod notify;
