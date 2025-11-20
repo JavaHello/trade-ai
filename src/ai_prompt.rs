@@ -320,48 +320,60 @@ fn build_market_analytics_json(
         "symbol": entry.symbol,
         "inst_id": entry.inst_id,
         "current_price": optional_float(entry.current_price),
-        "perpetual_indicators": {
-            "open_interest_latest": optional_float(entry.oi_latest),
-            "open_interest_average": optional_float(entry.oi_average),
-            "funding_rate": optional_float(entry.funding_rate),
-        },
-        "recent_candles_5m": build_kline_table_json(&entry.recent_candles_5m, "5m"),
-        "intraday_1m": {
-            "ema20": format_series_json(&entry.intraday_1m_ema20),
-            "macd": format_series_json(&entry.intraday_1m_macd),
-            "rsi7": format_series_json(&entry.intraday_1m_rsi7),
-            "rsi14": format_series_json(&entry.intraday_1m_rsi14),
-        },
-        "intraday_3m": {
-            "ema20": format_series_json(&entry.intraday_3m_ema20),
-            "macd": format_series_json(&entry.intraday_3m_macd),
-            "rsi7": format_series_json(&entry.intraday_3m_rsi7),
-            "rsi14": format_series_json(&entry.intraday_3m_rsi14),
-        },
-        "intraday_5m": {
-            "prices": format_series_json(&entry.intraday_5m_prices),
-            "ema20": format_series_json(&entry.intraday_5m_ema20),
-            "macd": format_series_json(&entry.intraday_5m_macd),
-            "rsi7": format_series_json(&entry.intraday_5m_rsi7),
-            "rsi14": format_series_json(&entry.intraday_5m_rsi14),
-        },
-        "intraday_15m": {
-            "ema20": format_series_json(&entry.intraday_15m_ema20),
-            "macd": format_series_json(&entry.intraday_15m_macd),
-            "rsi7": format_series_json(&entry.intraday_15m_rsi7),
-            "rsi14": format_series_json(&entry.intraday_15m_rsi14),
-        },
-        "recent_candles_4h": build_kline_table_json(&entry.recent_candles_4h, "4h"),
-        "swing_4h": {
-            "ema20": optional_float(entry.swing_ema20),
-            "ema50": optional_float(entry.swing_ema50),
-            "atr3": optional_float(entry.swing_atr3),
-            "atr14": optional_float(entry.swing_atr14),
-            "volume_current": optional_float(entry.swing_volume_current),
-            "volume_avg": optional_float(entry.swing_volume_avg),
-            "macd": format_series_json(&entry.swing_macd),
-            "rsi14": format_series_json(&entry.swing_rsi14),
-        }
+        "open_interest_latest": optional_float(entry.oi_latest),
+        "open_interest_average": optional_float(entry.oi_average),
+        "funding_rate": optional_float(entry.funding_rate),
+        "recent_candles": [
+            build_kline_table_json(&entry.recent_candles_5m, "5m"),
+            build_kline_table_json(&entry.recent_candles_4h, "4h"),
+        ],
+        "indicators": [
+            {
+                "label": "1分钟指标",
+                "interval": "1m",
+                "ema20": format_series_json(&entry.intraday_1m_ema20),
+                "macd": format_series_json(&entry.intraday_1m_macd),
+                "rsi7": format_series_json(&entry.intraday_1m_rsi7),
+                "rsi14": format_series_json(&entry.intraday_1m_rsi14),
+            },
+            {
+                "label": "3分钟指标",
+                "interval": "3m",
+                "ema20": format_series_json(&entry.intraday_3m_ema20),
+                "macd": format_series_json(&entry.intraday_3m_macd),
+                "rsi7": format_series_json(&entry.intraday_3m_rsi7),
+                "rsi14": format_series_json(&entry.intraday_3m_rsi14),
+            },
+            {
+                "label": "5分钟指标",
+                "interval": "5m",
+                "prices": format_series_json(&entry.intraday_5m_prices),
+                "ema20": format_series_json(&entry.intraday_5m_ema20),
+                "macd": format_series_json(&entry.intraday_5m_macd),
+                "rsi7": format_series_json(&entry.intraday_5m_rsi7),
+                "rsi14": format_series_json(&entry.intraday_5m_rsi14),
+            },
+            {
+                "label": "15分钟指标",
+                "interval": "15m",
+                "ema20": format_series_json(&entry.intraday_15m_ema20),
+                "macd": format_series_json(&entry.intraday_15m_macd),
+                "rsi7": format_series_json(&entry.intraday_15m_rsi7),
+                "rsi14": format_series_json(&entry.intraday_15m_rsi14),
+            },
+            {
+                "label": "4小时指标",
+                "interval": "4h",
+                "ema20": optional_float(entry.swing_ema20),
+                "ema50": optional_float(entry.swing_ema50),
+                "atr3": optional_float(entry.swing_atr3),
+                "atr14": optional_float(entry.swing_atr14),
+                "volume_current": optional_float(entry.swing_volume_current),
+                "volume_avg": optional_float(entry.swing_volume_avg),
+                "macd": format_series_json(&entry.swing_macd),
+                "rsi14": format_series_json(&entry.swing_rsi14),
+            }
+        ]
     })
 }
 
@@ -381,14 +393,7 @@ fn build_kline_table_json(candles: &Vec<KlineRecord>, interval: &str) -> Value {
         .collect();
 
     json!({
-        "field_descriptions": {
-            "t": "时间戳（秒）",
-            "o": "开盘价",
-            "h": "最高价",
-            "l": "最低价",
-            "c": "收盘价",
-            "v": "交易量",
-        },
+        "label": format!("{} K线", interval),
         "interval": interval,
         "klines": klines,
     })
