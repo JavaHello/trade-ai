@@ -418,7 +418,7 @@ fn build_kline_table_json(candles: &Vec<KlineRecord>, interval: &str) -> Value {
         .iter()
         .map(|candle| {
             json!({
-                "t": format!("{}", candle.timestamp_ms),
+                "t": format!("{}", (candle.timestamp_ms / 1000) as i64),
                 "o": format_float(candle.open),
                 "h": format_float(candle.high),
                 "l": format_float(candle.low),
@@ -430,7 +430,7 @@ fn build_kline_table_json(candles: &Vec<KlineRecord>, interval: &str) -> Value {
 
     json!({
         "field_descriptions": {
-            "t": "时间戳（毫秒）",
+            "t": "时间戳（秒）",
             "o": "开盘价",
             "h": "最高价",
             "l": "最低价",
