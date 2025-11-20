@@ -53,28 +53,7 @@ impl AiDecisionRecord {
                 return joined;
             }
         }
-        let mut fragments = self
-            .response
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            })
-            .take(2)
-            .collect::<Vec<_>>();
-        if fragments.is_empty() {
-            fragments.push(self.response.trim().to_string());
-        }
-        fragments.retain(|s| !s.is_empty());
-        if fragments.is_empty() {
-            "无内容".to_string()
-        } else {
-            fragments.join(" | ")
-        }
+        "无操作".to_string()
     }
 
     fn from_parts(

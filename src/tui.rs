@@ -1896,12 +1896,10 @@ impl TuiApp {
                     .saturating_sub((fixed_columns + spacing) as u16)
                     .max(8),
             );
-            let (operation_width, summary_width) = Self::ai_panel_column_widths(total_width);
             lines.push(Line::from(format_columns(&[
                 ("序号", ColumnAlign::Right, AI_INDEX_COLUMN_WIDTH),
                 ("时间", ColumnAlign::Left, AI_TIME_COLUMN_WIDTH),
-                ("操作", ColumnAlign::Left, operation_width),
-                ("摘要", ColumnAlign::Left, summary_width),
+                ("操作", ColumnAlign::Left, total_width),
             ])));
             let len = self.trade.ai_insight_count();
             let selected = self.trade.selected_ai_idx();
@@ -1916,7 +1914,6 @@ impl TuiApp {
                         "--:--:--",
                     );
                     let operation = Self::ai_operation_label(entry);
-                    let summary = entry.summary();
                     let row = format_columns(&[
                         (
                             ordinal_label.as_str(),
@@ -1924,8 +1921,7 @@ impl TuiApp {
                             AI_INDEX_COLUMN_WIDTH,
                         ),
                         (time_label.as_str(), ColumnAlign::Left, AI_TIME_COLUMN_WIDTH),
-                        (operation.as_str(), ColumnAlign::Left, operation_width),
-                        (summary.as_str(), ColumnAlign::Left, summary_width),
+                        (operation.as_str(), ColumnAlign::Left, total_width),
                     ]);
                     let highlight = self.trade.focus == TradeFocus::AiInsights && idx == selected;
                     lines.push(Line::styled(row, row_style(highlight)));
@@ -1953,32 +1949,6 @@ impl TuiApp {
             labels.push(format!("+{} 更多", entry.operations.len() - 2));
         }
         labels.join(" | ")
-    }
-
-    fn ai_panel_column_widths(total_width: usize) -> (usize, usize) {
-        if total_width <= 16 {
-            let mut operation = (total_width / 2).max(4);
-            if operation >= total_width {
-                operation = total_width.saturating_sub(4).max(4);
-            }
-            let mut summary = total_width.saturating_sub(operation).max(4);
-            if operation + summary > total_width {
-                let overflow = operation + summary - total_width;
-                if summary > overflow {
-                    summary -= overflow;
-                } else if operation > overflow {
-                    operation -= overflow;
-                }
-            }
-            (operation, summary)
-        } else {
-            let mut operation = (total_width / 3).max(10);
-            if operation + 8 > total_width {
-                operation = total_width.saturating_sub(8).max(6);
-            }
-            let summary = total_width.saturating_sub(operation).max(8);
-            (operation, summary)
-        }
     }
 
     fn render_log_row(
