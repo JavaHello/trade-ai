@@ -93,8 +93,8 @@ fn build_snapshot(
     snapshot: &AccountSnapshot,
     analytics: &[InstrumentAnalytics],
     performance: Option<&PerformanceSummary>,
-    inst_ids: &[String],
-    markets: &HashMap<String, MarketInfo>,
+    _inst_ids: &[String],
+    _markets: &HashMap<String, MarketInfo>,
     _leverages: &[InstrumentLeverage],
     timezone: ConfiguredTimeZone,
 ) -> String {
@@ -108,15 +108,6 @@ fn build_snapshot(
     data.push_str("\n");
     data.push_str("下方为您提供各种状态数据、价格数据和预测信号，助您发掘超额收益。再下方是您当前的账户信息，包括账户价值、业绩、持仓等。\n\n");
     data.push_str("⚠️ 所有数组、K线均按时间从旧 → 新排列（与系统说明一致）。\n");
-
-    // Trade limits
-    if !inst_ids.is_empty() && !markets.is_empty() {
-        data.push_str("## 交易产品基础信息:\n");
-        let limits_json = build_trade_limits_json(inst_ids, markets, analytics);
-        data.push_str("```json\n");
-        data.push_str(&limits_json.to_string());
-        data.push_str("\n```\n\n");
-    }
 
     // Market analytics
     if !analytics.is_empty() {
@@ -152,45 +143,6 @@ fn build_snapshot(
 
     data.push_str("\n根据以上数据，请以要求的 JSON 格式提供您的交易决策。");
     data
-}
-
-fn build_trade_limits_json(
-    inst_ids: &[String],
-    markets: &HashMap<String, MarketInfo>,
-    analytics: &[InstrumentAnalytics],
-) -> Value {
-    let mut price_lookup = HashMap::new();
-    for entry in analytics {
-        if let Some(price) = entry.current_price {
-            price_lookup.insert(entry.inst_id.to_ascii_uppercase(), price);
-        }
-    }
-
-    let mut limits = Vec::new();
-    for inst_id in inst_ids {
-        let Some(market) = markets.get(inst_id) else {
-            continue;
-        };
-
-        let min_size = if market.min_size > 0.0 {
-            format_contract_count(market.min_size)
-        } else {
-            "未知".to_string()
-        };
-
-        let mut limit_obj = json!({
-            "inst_id": inst_id,
-            "min_size": min_size,
-        });
-        if let Some(ct_val) = market.ct_val_ccy.as_ref() {
-            limit_obj["contract_value_ccy"] = json!(ct_val);
-        }
-        limit_obj["contract_value"] = json!(format_float(market.ct_val));
-
-        limits.push(limit_obj);
-    }
-
-    json!(limits)
 }
 
 fn build_balance_json(
@@ -447,18 +399,6 @@ fn format_series_json(values: &[f64]) -> Value {
     json!(formatted)
 }
 
-fn format_contract_count(value: f64) -> String {
-    if !value.is_finite() || value <= 0.0 {
-        return "-".to_string();
-    }
-    let rounded = value.round();
-    if (value - rounded).abs() < 1e-6 {
-        format!("{}", rounded as i64)
-    } else {
-        format_float(value)
-    }
-}
-
 fn format_timestamp_label(timestamp: Option<i64>, timezone: ConfiguredTimeZone) -> Option<String> {
     timestamp.and_then(|ts| timezone.format_timestamp(ts, "%d %H:%M:%S"))
 }
@@ -665,14 +605,5 @@ mod tests {
         assert_eq!(format_float(1.123456789), "1.12345679");
         assert_eq!(format_float(0.00000001), "0.00000001");
         assert_eq!(format_float(0.1), "0.1");
-    }
-
-    #[test]
-    fn test_format_contract_count() {
-        assert_eq!(format_contract_count(1.0), "1");
-        assert_eq!(format_contract_count(1.5), "1.5");
-        assert_eq!(format_contract_count(10.0), "10");
-        assert_eq!(format_contract_count(0.0), "-");
-        assert_eq!(format_contract_count(-1.0), "-");
     }
 }
