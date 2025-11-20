@@ -272,13 +272,13 @@ impl MarketDataFetcher {
 }
 
 #[derive(Debug, Clone)]
-struct Candle {
-    ts: i64,
-    open: f64,
-    high: f64,
-    low: f64,
-    close: f64,
-    volume: f64,
+pub struct Candle {
+    pub ts: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
 }
 
 impl Candle {
@@ -381,7 +381,7 @@ fn average_tail(values: &[f64], period: usize) -> Option<f64> {
     }
 }
 
-fn compute_ema(series: &[f64], period: usize) -> Vec<f64> {
+pub fn compute_ema(series: &[f64], period: usize) -> Vec<f64> {
     if series.is_empty() || period == 0 {
         return Vec::new();
     }
@@ -395,7 +395,7 @@ fn compute_ema(series: &[f64], period: usize) -> Vec<f64> {
     ema_values
 }
 
-fn compute_macd(series: &[f64]) -> Vec<f64> {
+pub fn compute_macd(series: &[f64]) -> Vec<f64> {
     if series.is_empty() {
         return Vec::new();
     }
@@ -407,7 +407,7 @@ fn compute_macd(series: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-fn compute_rsi(series: &[f64], period: usize) -> Vec<f64> {
+pub fn compute_rsi(series: &[f64], period: usize) -> Vec<f64> {
     if series.len() <= period || period == 0 {
         return Vec::new();
     }
@@ -444,7 +444,7 @@ fn compute_rsi(series: &[f64], period: usize) -> Vec<f64> {
     rs_values
 }
 
-fn compute_atr(candles: &[Candle], period: usize) -> Vec<f64> {
+pub fn compute_atr(candles: &[Candle], period: usize) -> Vec<f64> {
     if candles.len() <= period || period == 0 {
         return Vec::new();
     }

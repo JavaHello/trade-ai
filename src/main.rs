@@ -12,6 +12,9 @@ mod okx_analytics;
 mod trade_log;
 mod tui;
 
+#[cfg(test)]
+mod test_indicators;
+
 use std::collections::HashMap;
 
 use anyhow::anyhow;
