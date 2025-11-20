@@ -36,23 +36,28 @@ pub struct InstrumentAnalytics {
     pub oi_latest: Option<f64>,
     pub oi_average: Option<f64>,
     pub funding_rate: Option<f64>,
+
     pub intraday_1m_ema20: Vec<f64>,
     pub intraday_1m_macd: Vec<f64>,
     pub intraday_1m_rsi7: Vec<f64>,
     pub intraday_1m_rsi14: Vec<f64>,
+
     pub intraday_3m_ema20: Vec<f64>,
     pub intraday_3m_macd: Vec<f64>,
     pub intraday_3m_rsi7: Vec<f64>,
     pub intraday_3m_rsi14: Vec<f64>,
-    pub intraday_prices: Vec<f64>,
-    pub intraday_ema20: Vec<f64>,
-    pub intraday_macd: Vec<f64>,
-    pub intraday_rsi7: Vec<f64>,
-    pub intraday_rsi14: Vec<f64>,
+
+    pub intraday_5m_prices: Vec<f64>,
+    pub intraday_5m_ema20: Vec<f64>,
+    pub intraday_5m_macd: Vec<f64>,
+    pub intraday_5m_rsi7: Vec<f64>,
+    pub intraday_5m_rsi14: Vec<f64>,
+
     pub intraday_15m_ema20: Vec<f64>,
     pub intraday_15m_macd: Vec<f64>,
     pub intraday_15m_rsi7: Vec<f64>,
     pub intraday_15m_rsi14: Vec<f64>,
+
     pub swing_ema20: Option<f64>,
     pub swing_ema50: Option<f64>,
     pub swing_atr3: Option<f64>,
@@ -106,10 +111,10 @@ impl MarketDataFetcher {
         let intraday_3m = self
             .fetch_candles(inst_id, "3m", ANALYTICS_INTRADAY_LIMIT)
             .await?;
-        let intraday = self
+        let intraday_5m = self
             .fetch_candles(inst_id, "5m", ANALYTICS_INTRADAY_LIMIT)
             .await?;
-        if intraday.is_empty() {
+        if intraday_5m.is_empty() {
             return Err(anyhow!("{} 缺少 5 分钟 K 线数据", inst_id));
         }
         let intraday_15m = self
@@ -131,7 +136,7 @@ impl MarketDataFetcher {
         let rsi7_3m = compute_rsi(&closes_3m, RSI_SHORT_PERIOD);
         let rsi14_3m = compute_rsi(&closes_3m, RSI_LONG_PERIOD);
 
-        let closes_intraday: Vec<f64> = intraday.iter().map(|c| c.close).collect();
+        let closes_intraday: Vec<f64> = intraday_5m.iter().map(|c| c.close).collect();
         let closes_swing: Vec<f64> = swing.iter().map(|c| c.close).collect();
         let swing_volumes: Vec<f64> = swing.iter().map(|c| c.volume).collect();
         let ema20_intraday = compute_ema(&closes_intraday, EMA_SHORT_PERIOD);
@@ -174,11 +179,11 @@ impl MarketDataFetcher {
             intraday_3m_macd: take_tail(&macd_3m, ANALYTICS_SERIES_TAIL),
             intraday_3m_rsi7: take_tail(&rsi7_3m, ANALYTICS_SERIES_TAIL),
             intraday_3m_rsi14: take_tail(&rsi14_3m, ANALYTICS_SERIES_TAIL),
-            intraday_prices: take_tail(&closes_intraday, ANALYTICS_SERIES_TAIL),
-            intraday_ema20: take_tail(&ema20_intraday, ANALYTICS_SERIES_TAIL),
-            intraday_macd: take_tail(&macd_intraday, ANALYTICS_SERIES_TAIL),
-            intraday_rsi7: take_tail(&rsi7_intraday, ANALYTICS_SERIES_TAIL),
-            intraday_rsi14: take_tail(&rsi14_intraday, ANALYTICS_SERIES_TAIL),
+            intraday_5m_prices: take_tail(&closes_intraday, ANALYTICS_SERIES_TAIL),
+            intraday_5m_ema20: take_tail(&ema20_intraday, ANALYTICS_SERIES_TAIL),
+            intraday_5m_macd: take_tail(&macd_intraday, ANALYTICS_SERIES_TAIL),
+            intraday_5m_rsi7: take_tail(&rsi7_intraday, ANALYTICS_SERIES_TAIL),
+            intraday_5m_rsi14: take_tail(&rsi14_intraday, ANALYTICS_SERIES_TAIL),
             intraday_15m_ema20: take_tail(&ema20_15m, ANALYTICS_SERIES_TAIL),
             intraday_15m_macd: take_tail(&macd_15m, ANALYTICS_SERIES_TAIL),
             intraday_15m_rsi7: take_tail(&rsi7_15m, ANALYTICS_SERIES_TAIL),
@@ -191,7 +196,7 @@ impl MarketDataFetcher {
             swing_volume_avg,
             swing_macd: take_tail(&macd_swing, ANALYTICS_SERIES_TAIL),
             swing_rsi14: take_tail(&rsi14_swing, ANALYTICS_SERIES_TAIL),
-            recent_candles_5m: take_tail_candles(&intraday, RECENT_KLINE_TAIL),
+            recent_candles_5m: take_tail_candles(&intraday_5m, RECENT_KLINE_TAIL),
             recent_candles_4h: take_tail_candles(&swing, RECENT_KLINE_TAIL),
         })
     }
