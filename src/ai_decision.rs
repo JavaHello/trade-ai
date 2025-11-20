@@ -10,7 +10,7 @@ use crate::command::{
 };
 use crate::error_log::ErrorLogStore;
 use crate::okx::{MarketInfo, SharedAccountState};
-use crate::okx_analytics::{InstrumentAnalytics, MarketDataFetcher};
+use crate::okx_analytics::MarketDataFetcher;
 
 pub const AI_OPERATOR_NAME: &str = "Deepseek";
 pub const AI_TAG_ENTRY: &str = "dsentry";
@@ -50,7 +50,7 @@ impl<'a> DecisionExecutor<'a> {
         }
     }
 
-    pub async fn execute(&self, response: &str, analytics: &[InstrumentAnalytics]) -> Result<()> {
+    pub async fn execute(&self, response: &str) -> Result<()> {
         let Some(_) = &self.order_tx else {
             return Ok(());
         };
@@ -67,7 +67,7 @@ impl<'a> DecisionExecutor<'a> {
                 DecisionSignal::BuyToEnter | DecisionSignal::SellToEnter => {
                     self.place_entry_order(&decision).await?
                 }
-                DecisionSignal::Close => self.execute_close_signal(&decision, analytics).await?,
+                DecisionSignal::Close => self.execute_close_signal(&decision).await?,
                 DecisionSignal::CancelOrders => self.cancel_orders(&decision).await?,
             };
         }
@@ -208,11 +208,7 @@ impl<'a> DecisionExecutor<'a> {
         Ok(())
     }
 
-    async fn execute_close_signal(
-        &self,
-        decision: &AiDecisionPayload,
-        analytics: &[InstrumentAnalytics],
-    ) -> Result<()> {
+    async fn execute_close_signal(&self, decision: &AiDecisionPayload) -> Result<()> {
         let inst_id = self
             .resolve_inst_id(&decision.coin)
             .ok_or_else(|| anyhow!("无法匹配交易币种 {}", decision.coin))?;
@@ -235,7 +231,8 @@ impl<'a> DecisionExecutor<'a> {
             size = available;
         }
         let price = self
-            .price_for_inst(&inst_id, analytics)
+            .market
+            .price_for_inst(&inst_id)
             .await
             .with_context(|| format!("获取 {} 最新价格失败", inst_id))?;
         let (side, pos_side) = determine_close_side(&position);
@@ -391,24 +388,6 @@ impl<'a> DecisionExecutor<'a> {
             "Deepseek {inst_id} {label} 价格 {:.4} 与 {direction} 方向不符（{expectation}），已忽略",
             price
         )));
-    }
-
-    async fn price_for_inst(
-        &self,
-        inst_id: &str,
-        analytics: &[InstrumentAnalytics],
-    ) -> Result<f64> {
-        if let Some(price) = analytics
-            .iter()
-            .find(|entry| entry.inst_id.eq_ignore_ascii_case(inst_id))
-            .and_then(|entry| entry.current_price)
-        {
-            return Ok(price);
-        }
-        let entry = self.market.fetch_inst(inst_id).await?;
-        entry
-            .current_price
-            .ok_or_else(|| anyhow!("{} 缺少最新价格", inst_id))
     }
 
     fn resolve_inst_id(&self, coin: &str) -> Option<String> {

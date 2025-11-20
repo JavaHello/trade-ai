@@ -148,7 +148,7 @@ impl DeepseekReporter {
         if trimmed.is_empty() {
             return Ok(());
         }
-        if let Err(err) = decision_engine.execute(trimmed, &analytics).await {
+        if let Err(err) = decision_engine.execute(trimmed).await {
             let _ = self
                 .tx
                 .send(Command::Error(format!("执行 AI 决策失败: {err}")));

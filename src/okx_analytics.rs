@@ -4,6 +4,8 @@ use anyhow::{Context, Result, anyhow};
 use reqwest::Client;
 use serde::Deserialize;
 
+use crate::okx;
+
 const MARKET_CANDLES_ENDPOINT: &str = "https://www.okx.com/api/v5/market/candles";
 const FUNDING_RATE_ENDPOINT: &str = "https://www.okx.com/api/v5/public/funding-rate";
 const OPEN_INTEREST_ENDPOINT: &str = "https://www.okx.com/api/v5/public/open-interest";
@@ -81,6 +83,10 @@ impl MarketDataFetcher {
         Ok(MarketDataFetcher { http })
     }
 
+    pub async fn price_for_inst(&self, inst_id: &str) -> Result<f64> {
+        okx::fetch_mark_price(&self.http, inst_id).await
+    }
+
     pub async fn fetch_inst(&self, inst_id: &str) -> Result<InstrumentAnalytics> {
         let intraday = self
             .fetch_candles(inst_id, "5m", ANALYTICS_INTRADAY_LIMIT)
@@ -106,13 +112,13 @@ impl MarketDataFetcher {
         let atr14_swing = compute_atr(&swing, ATR_SLOW_PERIOD);
         let oi_stats = self.fetch_open_interest(inst_id).await?;
         let funding_rate = self.fetch_funding_rate(inst_id).await?;
-        let current_price = closes_intraday.last().copied();
+        let current_price = self.price_for_inst(inst_id).await?;
         let swing_volume_current = swing_volumes.last().copied();
         let swing_volume_avg = average_tail(&swing_volumes, VOLUME_AVG_PERIOD);
         Ok(InstrumentAnalytics {
             inst_id: inst_id.to_string(),
             symbol: inst_symbol(inst_id),
-            current_price,
+            current_price: Some(current_price),
             current_ema20: ema20_intraday.last().copied(),
             current_macd: macd_intraday.last().copied(),
             current_rsi7: rsi7_intraday.last().copied(),

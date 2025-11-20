@@ -146,10 +146,12 @@
 - 多单(`buy_to_enter`) → 止盈高于开仓价，止损低于开仓价, `entry_price` ≤ 当前价格
 - 空单(`sell_to_enter`) → 止盈低于开仓价，止损高于开仓价, `entry_price` ≥ 当前价格
 - 说明文字 `justification` ≤ 500 字符
-- 当 signal=`hold` 时：
-  - `quantity`=0, `leverage`=1
-  - 其他数值字段可填占位符
-- 对于有持仓的币种，如果本次 signal = `hold`，必须满足：
+- 对于“无持仓”的币种，且 signal = `hold`：
+  - quantity = 0
+  - leverage = 1
+  - entry_price / profit_target / stop_loss / risk_usd 统统必须为 0
+  - invalidation_condition 可以写“何时考虑开仓”的条件，也可以写简短说明
+- 对于“有持仓”的币种，且 signal = `hold`：
   1.  `confidence` 范围：
       - 如果只是信号不明朗而保守观望：0.3 - 0.5
       - 如果趋势明确、止盈止损合理、预期继续持有：0.5 - 0.7

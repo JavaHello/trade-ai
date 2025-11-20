@@ -56,6 +56,14 @@ pub struct MarkPriceData {
     pub ts: String,
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkPriceResponse {
+    code: String,
+    msg: String,
+    pub data: Vec<MarkPriceData>,
+}
+
 pub struct OkxWsClient {
     client: Client,
     tx: broadcast::Sender<Command>,
@@ -84,6 +92,7 @@ const PRIVATE_WS_ENDPOINT: &str = "wss://ws.okx.com:8443/ws/v5/private";
 const BUSINESS_WS_ENDPOINT: &str = "wss://ws.okx.com:8443/ws/v5/business";
 const OKX_API_BASE: &str = "https://www.okx.com";
 const MARK_PRICE_CANDLES_ENDPOINT: &str = "https://www.okx.com/api/v5/market/mark-price-candles";
+const MARK_PRICE_ENDPOINT: &str = "https://www.okx.com/api/v5/public/mark-price";
 const INSTRUMENTS_ENDPOINT: &str = "/api/v5/account/instruments";
 const ACCOUNT_LEVERAGE_ENDPOINT: &str = "/api/v5/account/leverage-info";
 const TRADE_ORDER_ENDPOINT: &str = "/api/v5/trade/order";
@@ -1595,6 +1604,37 @@ pub async fn bootstrap_history(
         return Ok(Vec::new());
     }
     Ok(aggregated)
+}
+
+pub async fn fetch_mark_price(client: &Client, inst_id: &str) -> Result<f64, anyhow::Error> {
+    let response = client
+        .get(MARK_PRICE_ENDPOINT)
+        .query(&[("instId", inst_id)])
+        .send()
+        .await
+        .with_context(|| format!("requesting mark price for {inst_id}"))?
+        .error_for_status()
+        .with_context(|| format!("mark price response status for {inst_id}"))?
+        .json::<MarkPriceResponse>()
+        .await
+        .with_context(|| format!("decoding mark price for {inst_id}"))?;
+    if response.code != "0" {
+        return Err(anyhow!(
+            "okx mark price error for {} (code {}): {}",
+            inst_id,
+            response.code,
+            response.msg
+        ));
+    }
+    if let Some(entry) = response.data.first() {
+        let mark_px = entry
+            .mark_px
+            .parse::<f64>()
+            .with_context(|| format!("parsing mark price '{}' for {}", entry.mark_px, inst_id))?;
+        Ok(mark_px)
+    } else {
+        Err(anyhow!("no mark price data for {}", inst_id))
+    }
 }
 
 async fn fetch_history_for_inst(
