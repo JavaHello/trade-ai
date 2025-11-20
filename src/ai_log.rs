@@ -14,7 +14,6 @@ pub struct AiDecisionRecord {
     pub system_prompt: String,
     pub user_prompt: String,
     pub response: String,
-    pub justification: Option<String>,
     pub operations: Vec<AiDecisionOperation>,
     pub analysis_error: Option<String>,
 }
@@ -25,14 +24,12 @@ impl AiDecisionRecord {
             LocalResult::Single(dt) => dt,
             _ => Local::now(),
         };
-        let (justification, operations, analysis_error) =
-            Self::analyze_response(&payload.response, None);
+        let (operations, analysis_error) = Self::analyze_response(&payload.response);
         AiDecisionRecord {
             timestamp,
             system_prompt: payload.system_prompt,
             user_prompt: payload.user_prompt,
             response: payload.response,
-            justification,
             operations,
             analysis_error,
         }
@@ -43,12 +40,6 @@ impl AiDecisionRecord {
             let trimmed = error.trim();
             if !trimmed.is_empty() {
                 return format!("解析失败: {trimmed}");
-            }
-        }
-        if let Some(justification) = self.justification.as_deref() {
-            let trimmed = justification.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
             }
         }
         if !self.operations.is_empty() {
@@ -91,7 +82,6 @@ impl AiDecisionRecord {
         system_prompt: String,
         user_prompt: String,
         response: String,
-        justification: Option<String>,
         operations: Vec<AiDecisionOperation>,
         analysis_error: Option<String>,
     ) -> Self {
@@ -99,8 +89,7 @@ impl AiDecisionRecord {
             LocalResult::Single(dt) => dt,
             _ => Local::now(),
         };
-        let (justification, derived_operations, derived_error) =
-            Self::analyze_response(&response, justification);
+        let (derived_operations, derived_error) = Self::analyze_response(&response);
         let operations = if operations.is_empty() {
             derived_operations
         } else {
@@ -112,7 +101,6 @@ impl AiDecisionRecord {
             system_prompt,
             user_prompt,
             response,
-            justification,
             operations,
             analysis_error,
         }
@@ -122,17 +110,13 @@ impl AiDecisionRecord {
         self.timestamp.timestamp_millis()
     }
 
-    fn analyze_response(
-        response: &str,
-        provided: Option<String>,
-    ) -> (Option<String>, Vec<AiDecisionOperation>, Option<String>) {
+    fn analyze_response(response: &str) -> (Vec<AiDecisionOperation>, Option<String>) {
         let (parsed, analysis_error) = match Self::parse_json_block(response) {
             Ok(parsed) => (Some(parsed), None),
             Err(err) => (None, Some(err)),
         };
-        let justification = Self::derive_justification(parsed.as_ref(), provided);
         let operations = Self::derive_operations(parsed.as_ref());
-        (justification, operations, analysis_error)
+        (operations, analysis_error)
     }
 
     fn parse_json_block(response: &str) -> Result<serde_json::Value, String> {
@@ -159,32 +143,6 @@ impl AiDecisionRecord {
             return None;
         }
         response.get(start_idx..=end_idx)
-    }
-
-    fn derive_justification(
-        parsed: Option<&serde_json::Value>,
-        provided: Option<String>,
-    ) -> Option<String> {
-        let normalized = provided
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        if normalized.is_some() {
-            return normalized;
-        }
-        match parsed {
-            Some(serde_json::Value::Array(items)) => items
-                .iter()
-                .filter_map(|item| item.get("justification"))
-                .filter_map(|field| field.as_str())
-                .map(|text| text.trim().to_string())
-                .find(|text| !text.is_empty()),
-            Some(value) => value
-                .get("justification")
-                .and_then(|field| field.as_str())
-                .map(|text| text.trim().to_string())
-                .filter(|text| !text.is_empty()),
-            None => None,
-        }
     }
 
     fn derive_operations(parsed: Option<&serde_json::Value>) -> Vec<AiDecisionOperation> {
@@ -317,8 +275,6 @@ struct StoredAiDecision {
     user_prompt: String,
     response: String,
     #[serde(default)]
-    justification: Option<String>,
-    #[serde(default)]
     operations: Vec<AiDecisionOperation>,
     #[serde(default, rename = "operation", skip_serializing)]
     legacy_operation: Option<AiDecisionOperation>,
@@ -340,7 +296,6 @@ impl StoredAiDecision {
             self.system_prompt,
             self.user_prompt,
             self.response,
-            self.justification,
             operations,
             self.analysis_error,
         )
@@ -354,7 +309,6 @@ impl From<&AiDecisionRecord> for StoredAiDecision {
             system_prompt: value.system_prompt.clone(),
             user_prompt: value.user_prompt.clone(),
             response: value.response.clone(),
-            justification: value.justification.clone(),
             operations: value.operations.clone(),
             legacy_operation: None,
             analysis_error: value.analysis_error.clone(),
@@ -412,6 +366,7 @@ pub struct AiDecisionOperation {
     pub invalidation: Option<String>,
     pub confidence: Option<f64>,
     pub risk_usd: Option<f64>,
+    pub justification: Option<String>,
 }
 
 impl AiDecisionOperation {
@@ -434,6 +389,11 @@ impl AiDecisionOperation {
             .filter(|s| !s.is_empty());
         let confidence = value.get("confidence").and_then(Self::parse_number);
         let risk_usd = value.get("risk_usd").and_then(Self::parse_number);
+        let justification = value
+            .get("justification")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         Some(AiDecisionOperation {
             signal,
             coin,
@@ -444,6 +404,7 @@ impl AiDecisionOperation {
             invalidation,
             confidence,
             risk_usd,
+            justification,
         })
     }
 
@@ -528,6 +489,11 @@ impl AiDecisionOperation {
         if let Some(confidence) = self.confidence {
             if (0.0..=1.0).contains(&confidence) {
                 lines.push(format!("信心 {}", Self::format_number(confidence)));
+            }
+        }
+        if let Some(justification) = self.justification.as_deref() {
+            if !justification.is_empty() {
+                lines.push(format!("理由 {}", justification));
             }
         }
         lines

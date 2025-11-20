@@ -157,7 +157,7 @@ fn build_snapshot(
     data.push_str(&build_orders_json(snapshot, timezone).to_string());
     data.push_str("\n```\n\n");
 
-    data.push_str("\n\n根据以上数据，请以要求的 JSON 格式提供您的交易决策。");
+    data.push_str("\n根据以上数据，请以要求的 JSON 格式提供您的交易决策。");
     data
 }
 

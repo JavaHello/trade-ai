@@ -454,11 +454,15 @@ impl TradeState {
     }
 
     fn ai_detail_max_scroll(&self) -> usize {
-        if self.ai_detail_total_rows == 0 {
+        if self.ai_detail_total_rows == 0 || self.ai_detail_view_height == 0 {
             0
         } else {
             let view = self.ai_detail_view_height.max(1) as usize;
-            self.ai_detail_total_rows.saturating_sub(view)
+            if self.ai_detail_total_rows <= view {
+                0
+            } else {
+                self.ai_detail_total_rows.saturating_sub(view)
+            }
         }
     }
 
@@ -2426,19 +2430,6 @@ impl TuiApp {
         let timestamp =
             self.format_timestamp_or_default(entry.timestamp_ms(), "%Y-%m-%d %H:%M:%S", "--");
         let mut lines = vec![Line::from(format!("时间 {timestamp}"))];
-        lines.push(Line::from(Span::styled(
-            "[User Snapshot]",
-            Style::default()
-                .fg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        )));
-        if entry.user_prompt.trim().is_empty() {
-            lines.push(Line::from("--"));
-        } else {
-            for line in entry.user_prompt.lines() {
-                lines.push(Line::from(line));
-            }
-        }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "[Decision]",
@@ -2486,21 +2477,17 @@ impl TuiApp {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "[Justification]",
+            "[User Prompt]",
             Style::default()
-                .fg(Color::LightYellow)
+                .fg(Color::LightGreen)
                 .add_modifier(Modifier::BOLD),
         )));
-        if let Some(justification) = entry.justification.as_deref() {
-            if justification.trim().is_empty() {
-                lines.push(Line::from("--"));
-            } else {
-                for line in justification.lines() {
-                    lines.push(Line::from(line));
-                }
-            }
+        if entry.user_prompt.trim().is_empty() {
+            lines.push(Line::from("--"));
         } else {
-            lines.push(Line::from("未解析到 justification 字段"));
+            for line in entry.user_prompt.lines() {
+                lines.push(Line::from(line));
+            }
         }
         lines.push(Line::from(""));
         lines.push(Line::from("按 o 关闭 · 原文仅供参考"));
@@ -2661,20 +2648,24 @@ impl TuiApp {
             return lines.len();
         }
         let width = max_width as usize;
-        lines
-            .iter()
-            .map(|line| {
-                let mut line_width = 0;
-                for span in line.spans.iter() {
-                    line_width += span.content.width();
-                }
-                if line_width == 0 {
-                    1
-                } else {
-                    (line_width + width - 1) / width
-                }
-            })
-            .sum()
+        if width == 0 {
+            return lines.len();
+        }
+        let mut total = 0;
+        for line in lines {
+            let mut line_width = 0;
+            for span in line.spans.iter() {
+                let str_width = UnicodeWidthStr::width(span.content.as_ref());
+                line_width += str_width;
+            }
+            if line_width == 0 {
+                total += 1;
+            } else {
+                let wrapped = (line_width + width - 1) / width;
+                total += wrapped.max(1);
+            }
+        }
+        total.max(lines.len())
     }
 
     fn order_field_span(&self, label: &str, value: &str, active: bool) -> Line<'static> {
