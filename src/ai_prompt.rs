@@ -468,14 +468,13 @@ fn optional_float(value: Option<f64>) -> Value {
 }
 
 fn format_float(value: f64) -> String {
-    let mut repr = format!("{value:.8}");
-    while repr.contains('.') && repr.ends_with('0') {
-        repr.pop();
+    if value.abs() >= 100.0 {
+        format!("{value:.2}")
+    } else if value.abs() >= 1.0 {
+        format!("{value:.4}")
+    } else {
+        format!("{value:.6}")
     }
-    if repr.ends_with('.') {
-        repr.push('0');
-    }
-    repr
 }
 
 #[cfg(test)]
