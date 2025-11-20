@@ -108,7 +108,6 @@ fn build_snapshot(
     data.push_str("\n");
     data.push_str("下方为您提供各种状态数据、价格数据和预测信号，助您发掘超额收益。再下方是您当前的账户信息，包括账户价值、业绩、持仓等。\n\n");
     data.push_str("⚠️ 所有数组、K线均按时间从旧 → 新排列（与系统说明一致）。\n");
-    data.push_str("除非另有说明，日内数据以5分钟为间隔提供。\n\n");
 
     // Trade limits
     if !inst_ids.is_empty() && !markets.is_empty() {
@@ -369,9 +368,6 @@ fn build_market_analytics_json(
                 "symbol": entry.symbol,
                 "inst_id": entry.inst_id,
                 "current_price": optional_float(entry.current_price),
-                "current_ema20": optional_float(entry.current_ema20),
-                "current_macd": optional_float(entry.current_macd),
-                "current_rsi7": optional_float(entry.current_rsi7),
                 "perpetual_indicators": {
                     "open_interest_latest": optional_float(entry.oi_latest),
                     "open_interest_average": optional_float(entry.oi_average),
@@ -532,9 +528,6 @@ mod tests {
             inst_id: "BTC-USDT-SWAP".to_string(),
             symbol: "BTC/USDT".to_string(),
             current_price: Some(50500.0),
-            current_ema20: Some(50000.0),
-            current_macd: Some(10.5),
-            current_rsi7: Some(65.0),
             oi_latest: Some(1000000.0),
             oi_average: Some(950000.0),
             funding_rate: Some(0.0001),
