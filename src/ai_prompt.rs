@@ -87,11 +87,33 @@ pub fn build_snapshot_prompt(
     buffer.push_str("⚠️ **重要提示：以下所有价格或信号数据均按时间顺序排列：最早 → 最新**\n\n");
     buffer.push_str("**时间周期说明：**除非章节标题另有说明，否则日内数据以**5分钟为间隔**提供。如果某个币种使用不同的时间间隔，则会在该币种的章节中明确说明。\n\n");
 
+    buffer.push_str("\n---\n");
     append_trade_limits(&mut buffer, inst_ids, markets, analytics);
+    buffer.push_str("\n---\n");
     append_leverage_settings(&mut buffer, leverages);
+    buffer.push_str("\n---\n");
     append_market_analytics(&mut buffer, analytics, timezone);
 
+    buffer.push_str("\n---\n");
+    buffer.push_str("\n#【资金币种】\n");
+    if snapshot.balance.delta.is_empty() {
+        buffer.push_str("无资金明细\n");
+    } else {
+        for balance in snapshot.balance.delta.iter().take(MAX_BALANCES) {
+            buffer.push_str("- ");
+            buffer.push_str(&format_balance(balance));
+            buffer.push('\n');
+        }
+        if snapshot.balance.delta.len() > MAX_BALANCES {
+            buffer.push_str(&format!(
+                "... 其余 {} 个币种已省略\n",
+                snapshot.balance.delta.len() - MAX_BALANCES
+            ));
+        }
+    }
+
     if let Some(summary) = performance {
+        buffer.push_str("\n---\n");
         buffer.push_str("\n#【策略运行概览】\n");
         if let Some(eq) = snapshot.balance.total_equity {
             buffer.push_str(&format!("总权益: {}\n", format_float(eq)));
@@ -108,6 +130,7 @@ pub fn build_snapshot_prompt(
         }
     }
 
+    buffer.push_str("\n---\n");
     buffer.push_str("\n#【持仓情况】\n");
     if snapshot.positions.is_empty() {
         buffer.push_str("无持仓\n");
@@ -125,6 +148,7 @@ pub fn build_snapshot_prompt(
         }
     }
 
+    buffer.push_str("\n---\n");
     buffer.push_str("\n#【挂单情况】\n");
     if snapshot.open_orders.is_empty() {
         buffer.push_str("无挂单\n");
@@ -142,22 +166,6 @@ pub fn build_snapshot_prompt(
         }
     }
 
-    buffer.push_str("\n#【资金币种】\n");
-    if snapshot.balance.delta.is_empty() {
-        buffer.push_str("无资金明细\n");
-    } else {
-        for balance in snapshot.balance.delta.iter().take(MAX_BALANCES) {
-            buffer.push_str("- ");
-            buffer.push_str(&format_balance(balance));
-            buffer.push('\n');
-        }
-        if snapshot.balance.delta.len() > MAX_BALANCES {
-            buffer.push_str(&format!(
-                "... 其余 {} 个币种已省略\n",
-                snapshot.balance.delta.len() - MAX_BALANCES
-            ));
-        }
-    }
     buffer.push_str("\n\n根据以上数据，请以要求的 JSON 格式提供您的交易决策。");
     buffer
 }
