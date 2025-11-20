@@ -121,10 +121,13 @@ fn build_snapshot(
     // Market analytics
     if !analytics.is_empty() {
         data.push_str("## 市场分析:\n");
-        let market_json = build_market_analytics_json(analytics, timezone);
-        data.push_str("```json\n");
-        data.push_str(&market_json.to_string());
-        data.push_str("\n```\n\n");
+        for entry in analytics.iter() {
+            data.push_str(&format!("### 产品: {} ({})\n", entry.inst_id, entry.symbol));
+            let market_json = build_market_analytics_json(&entry, timezone);
+            data.push_str("```json\n");
+            data.push_str(&market_json.to_string());
+            data.push_str("\n```\n\n");
+        }
     }
 
     // Balance
@@ -358,81 +361,85 @@ fn build_orders_json(snapshot: &AccountSnapshot, timezone: ConfiguredTimeZone) -
 }
 
 fn build_market_analytics_json(
-    analytics: &[InstrumentAnalytics],
-    timezone: ConfiguredTimeZone,
+    entry: &InstrumentAnalytics,
+    _timezone: ConfiguredTimeZone,
 ) -> Value {
-    let instruments: Vec<Value> = analytics
-        .iter()
-        .map(|entry| {
-            json!({
-                "symbol": entry.symbol,
-                "inst_id": entry.inst_id,
-                "current_price": optional_float(entry.current_price),
-                "perpetual_indicators": {
-                    "open_interest_latest": optional_float(entry.oi_latest),
-                    "open_interest_average": optional_float(entry.oi_average),
-                    "funding_rate": optional_float(entry.funding_rate),
-                },
-                "recent_candles_5m": build_kline_table_json(&entry.recent_candles_5m, timezone),
-                "intraday_1m": {
-                    "ema20": format_series_json(&entry.intraday_1m_ema20),
-                    "macd": format_series_json(&entry.intraday_1m_macd),
-                    "rsi7": format_series_json(&entry.intraday_1m_rsi7),
-                    "rsi14": format_series_json(&entry.intraday_1m_rsi14),
-                },
-                "intraday_3m": {
-                    "ema20": format_series_json(&entry.intraday_3m_ema20),
-                    "macd": format_series_json(&entry.intraday_3m_macd),
-                    "rsi7": format_series_json(&entry.intraday_3m_rsi7),
-                    "rsi14": format_series_json(&entry.intraday_3m_rsi14),
-                },
-                "intraday_5m": {
-                    "prices": format_series_json(&entry.intraday_5m_prices),
-                    "ema20": format_series_json(&entry.intraday_5m_ema20),
-                    "macd": format_series_json(&entry.intraday_5m_macd),
-                    "rsi7": format_series_json(&entry.intraday_5m_rsi7),
-                    "rsi14": format_series_json(&entry.intraday_5m_rsi14),
-                },
-                "intraday_15m": {
-                    "ema20": format_series_json(&entry.intraday_15m_ema20),
-                    "macd": format_series_json(&entry.intraday_15m_macd),
-                    "rsi7": format_series_json(&entry.intraday_15m_rsi7),
-                    "rsi14": format_series_json(&entry.intraday_15m_rsi14),
-                },
-                "recent_candles_4h": build_kline_table_json(&entry.recent_candles_4h, timezone),
-                "swing_4h": {
-                    "ema20": optional_float(entry.swing_ema20),
-                    "ema50": optional_float(entry.swing_ema50),
-                    "atr3": optional_float(entry.swing_atr3),
-                    "atr14": optional_float(entry.swing_atr14),
-                    "volume_current": optional_float(entry.swing_volume_current),
-                    "volume_avg": optional_float(entry.swing_volume_avg),
-                    "macd": format_series_json(&entry.swing_macd),
-                    "rsi14": format_series_json(&entry.swing_rsi14),
-                }
-            })
-        })
-        .collect();
-
-    json!(instruments)
+    json!({
+        "symbol": entry.symbol,
+        "inst_id": entry.inst_id,
+        "current_price": optional_float(entry.current_price),
+        "perpetual_indicators": {
+            "open_interest_latest": optional_float(entry.oi_latest),
+            "open_interest_average": optional_float(entry.oi_average),
+            "funding_rate": optional_float(entry.funding_rate),
+        },
+        "recent_candles_5m": build_kline_table_json(&entry.recent_candles_5m, "5m"),
+        "intraday_1m": {
+            "ema20": format_series_json(&entry.intraday_1m_ema20),
+            "macd": format_series_json(&entry.intraday_1m_macd),
+            "rsi7": format_series_json(&entry.intraday_1m_rsi7),
+            "rsi14": format_series_json(&entry.intraday_1m_rsi14),
+        },
+        "intraday_3m": {
+            "ema20": format_series_json(&entry.intraday_3m_ema20),
+            "macd": format_series_json(&entry.intraday_3m_macd),
+            "rsi7": format_series_json(&entry.intraday_3m_rsi7),
+            "rsi14": format_series_json(&entry.intraday_3m_rsi14),
+        },
+        "intraday_5m": {
+            "prices": format_series_json(&entry.intraday_5m_prices),
+            "ema20": format_series_json(&entry.intraday_5m_ema20),
+            "macd": format_series_json(&entry.intraday_5m_macd),
+            "rsi7": format_series_json(&entry.intraday_5m_rsi7),
+            "rsi14": format_series_json(&entry.intraday_5m_rsi14),
+        },
+        "intraday_15m": {
+            "ema20": format_series_json(&entry.intraday_15m_ema20),
+            "macd": format_series_json(&entry.intraday_15m_macd),
+            "rsi7": format_series_json(&entry.intraday_15m_rsi7),
+            "rsi14": format_series_json(&entry.intraday_15m_rsi14),
+        },
+        "recent_candles_4h": build_kline_table_json(&entry.recent_candles_4h, "4h"),
+        "swing_4h": {
+            "ema20": optional_float(entry.swing_ema20),
+            "ema50": optional_float(entry.swing_ema50),
+            "atr3": optional_float(entry.swing_atr3),
+            "atr14": optional_float(entry.swing_atr14),
+            "volume_current": optional_float(entry.swing_volume_current),
+            "volume_avg": optional_float(entry.swing_volume_avg),
+            "macd": format_series_json(&entry.swing_macd),
+            "rsi14": format_series_json(&entry.swing_rsi14),
+        }
+    })
 }
 
-fn build_kline_table_json(candles: &Vec<KlineRecord>, timezone: ConfiguredTimeZone) -> Value {
+fn build_kline_table_json(candles: &Vec<KlineRecord>, interval: &str) -> Value {
     let klines: Vec<Value> = candles
         .iter()
         .map(|candle| {
             json!({
-                "timestamp": format_kline_timestamp(candle.timestamp_ms, timezone),
-                "open": format_float(candle.open),
-                "high": format_float(candle.high),
-                "low": format_float(candle.low),
-                "close": format_float(candle.close),
-                "volume": format_float(candle.volume),
+                "t": format!("{}", candle.timestamp_ms),
+                "o": format_float(candle.open),
+                "h": format_float(candle.high),
+                "l": format_float(candle.low),
+                "c": format_float(candle.close),
+                "v": format_float(candle.volume),
             })
         })
         .collect();
 
-    json!(klines)
+    json!({
+        "field_descriptions": {
+            "t": "时间戳（毫秒）",
+            "o": "开盘价",
+            "h": "最高价",
+            "l": "最低价",
+            "c": "收盘价",
+            "v": "交易量",
+        },
+        "interval": interval,
+        "klines": klines,
+    })
 }
 
 fn format_series_json(values: &[f64]) -> Value {
@@ -452,14 +459,9 @@ fn format_contract_count(value: f64) -> String {
     }
 }
 
-fn format_kline_timestamp(timestamp_ms: i64, timezone: ConfiguredTimeZone) -> String {
-    format_timestamp_label(Some(timestamp_ms), timezone).unwrap_or_else(|| timestamp_ms.to_string())
-}
-
 fn format_timestamp_label(timestamp: Option<i64>, timezone: ConfiguredTimeZone) -> Option<String> {
     timestamp.and_then(|ts| timezone.format_timestamp(ts, "%d %H:%M:%S"))
 }
-
 fn optional_float(value: Option<f64>) -> Value {
     match value {
         Some(v) => json!(format_float(v)),
