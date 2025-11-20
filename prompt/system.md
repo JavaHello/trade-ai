@@ -12,7 +12,7 @@
 ## 市场参数 (Market Parameters)
 
 - **交易所**：OKX（永续合约）
-- **资产范围**：BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP,DOGE-USDT-SWAP,XRP-USDT-SWAP（永续合约）
+- **资产范围**：BTC-USDT-SWAP,ETH-USDT-SWAP,SOL-USDT-SWAP（永续合约）
 - **初始资金**：20 USDT
 - **市场时间**：24/7 不间断交易
 - **决策频率**：每 1-5 分钟一次（中低频交易）
@@ -285,32 +285,6 @@ Sharpe Ratio = (平均收益 - 无风险利率) / 收益标准差
 3. 有可用资金才考虑新机会
 4. 风险管理优先
 5. 不确定 → 选择 hold
-
-## 在做决策前，先根据 4 小时数据判断主趋势（定量规则）
-
-使用 swing_4h 中的收盘价、EMA20、EMA50、MACD、RSI14 判定：
-
-- 明确上升趋势（UPTREND）：
-
-  - 最近收盘价 > EMA20 且 EMA20 > EMA50
-  - MACD 最新值 > 0
-  - RSI14 > 50
-  - 在这种环境下：
-    - 开新仓时 **优先考虑 buy_to_enter**
-    - 除非 RSI14 > 75 或出现尖锐放量冲高回落，否则避免做空
-
-- 明确下跌趋势（DOWNTREND）：
-
-  - 最近收盘价 < EMA20 且 EMA20 < EMA50
-  - MACD 最新值 < 0
-  - RSI14 < 50
-  - 在这种环境下：
-    - 开新仓时 **优先考虑 sell_to_enter**
-    - 除非 RSI14 < 30 且出现明显的放量企稳信号，否则避免做多
-
-- 震荡区间（RANGE）：
-  - 价格在 EMA20 和 EMA50 附近来回，MACD 绝对值较小
-  - 可以双向交易（buy_to_enter 或 sell_to_enter 都可以），但止损需要更紧。
 
 ---
 
