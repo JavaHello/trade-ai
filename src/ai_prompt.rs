@@ -95,7 +95,7 @@ fn build_snapshot(
     performance: Option<&PerformanceSummary>,
     inst_ids: &[String],
     markets: &HashMap<String, MarketInfo>,
-    leverages: &[InstrumentLeverage],
+    _leverages: &[InstrumentLeverage],
     timezone: ConfiguredTimeZone,
 ) -> String {
     let current_time = timezone
@@ -112,19 +112,10 @@ fn build_snapshot(
 
     // Trade limits
     if !inst_ids.is_empty() && !markets.is_empty() {
-        data.push_str("## 交易限制:\n");
+        data.push_str("## 交易产品基础信息:\n");
         let limits_json = build_trade_limits_json(inst_ids, markets, analytics);
         data.push_str("```json\n");
         data.push_str(&limits_json.to_string());
-        data.push_str("\n```\n\n");
-    }
-
-    // Leverage settings
-    if !leverages.is_empty() {
-        data.push_str("## 杠杆设置:\n");
-        let leverage_json = build_leverage_json(leverages);
-        data.push_str("```json\n");
-        data.push_str(&leverage_json.to_string());
         data.push_str("\n```\n\n");
     }
 
@@ -178,7 +169,6 @@ fn build_trade_limits_json(
         let Some(market) = markets.get(inst_id) else {
             continue;
         };
-        let price = price_lookup.get(&inst_id.to_ascii_uppercase()).copied();
 
         let min_size = if market.min_size > 0.0 {
             format_contract_count(market.min_size)
@@ -190,68 +180,15 @@ fn build_trade_limits_json(
             "inst_id": inst_id,
             "min_size": min_size,
         });
-
-        if market.ct_val > 0.0 {
-            let obj = limit_obj.as_object_mut().unwrap();
-            obj.insert(
-                "contract_value".to_string(),
-                json!(format_float(market.ct_val)),
-            );
-            if let Some(ccy) = market
-                .ct_val_ccy
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-            {
-                obj.insert("contract_currency".to_string(), json!(ccy));
-            }
-
-            if market.min_size > 0.0 {
-                let notional = market.ct_val * market.min_size;
-                obj.insert("min_notional".to_string(), json!(format_float(notional)));
-
-                if is_usdt_quote(inst_id) {
-                    if let Some(p) = price {
-                        let approx = p * notional;
-                        obj.insert(
-                            "min_notional_usdt_approx".to_string(),
-                            json!(format_float(approx)),
-                        );
-                    }
-                }
-            }
+        if let Some(ct_val) = market.ct_val_ccy.as_ref() {
+            limit_obj["contract_value_ccy"] = json!(ct_val);
         }
+        limit_obj["contract_value"] = json!(format_float(market.ct_val));
 
         limits.push(limit_obj);
     }
 
     json!(limits)
-}
-
-fn build_leverage_json(leverages: &[InstrumentLeverage]) -> Value {
-    let leverage_list: Vec<Value> = leverages
-        .iter()
-        .map(|entry| {
-            let mut obj = json!({
-                "inst_id": entry.inst_id,
-            });
-            let map = obj.as_object_mut().unwrap();
-
-            if let Some(net) = entry.net {
-                map.insert("net".to_string(), json!(format_float(net)));
-            }
-            if let Some(long) = entry.long {
-                map.insert("long".to_string(), json!(format_float(long)));
-            }
-            if let Some(short) = entry.short {
-                map.insert("short".to_string(), json!(format_float(short)));
-            }
-
-            obj
-        })
-        .collect();
-
-    json!(leverage_list)
 }
 
 fn build_balance_json(
@@ -519,17 +456,12 @@ fn format_contract_count(value: f64) -> String {
     }
 }
 
-fn is_usdt_quote(inst_id: &str) -> bool {
-    let upper = inst_id.to_ascii_uppercase();
-    upper.ends_with("-USDT") || upper.contains("-USDT-")
-}
-
 fn format_kline_timestamp(timestamp_ms: i64, timezone: ConfiguredTimeZone) -> String {
     format_timestamp_label(Some(timestamp_ms), timezone).unwrap_or_else(|| timestamp_ms.to_string())
 }
 
 fn format_timestamp_label(timestamp: Option<i64>, timezone: ConfiguredTimeZone) -> Option<String> {
-    timestamp.and_then(|ts| timezone.format_timestamp(ts, "%Y-%m-%d %H:%M:%S"))
+    timestamp.and_then(|ts| timezone.format_timestamp(ts, "%d %H:%M:%S"))
 }
 
 fn optional_float(value: Option<f64>) -> Value {
@@ -748,14 +680,5 @@ mod tests {
         assert_eq!(format_contract_count(10.0), "10");
         assert_eq!(format_contract_count(0.0), "-");
         assert_eq!(format_contract_count(-1.0), "-");
-    }
-
-    #[test]
-    fn test_is_usdt_quote() {
-        assert!(is_usdt_quote("BTC-USDT-SWAP"));
-        assert!(is_usdt_quote("BTC-USDT"));
-        assert!(is_usdt_quote("btc-usdt-swap"));
-        assert!(!is_usdt_quote("BTC-USD-SWAP"));
-        assert!(!is_usdt_quote("BTCUSDT"));
     }
 }
