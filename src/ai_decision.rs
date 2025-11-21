@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::fmt;
 
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
+use serde::de::{self, Deserializer, Visitor};
 use tokio::sync::{RwLock, broadcast, mpsc};
 
 use crate::command::{
@@ -587,34 +589,133 @@ fn parse_ai_decisions(raw: &str) -> Result<Vec<AiDecisionPayload>> {
     }
 }
 
+
 #[derive(Debug, Deserialize)]
 struct AiDecisionPayload {
     signal: DecisionSignal,
     coin: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_f64")]
     quantity: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_f64")]
     leverage: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_f64")]
     entry_price: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_f64")]
     profit_target: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_f64")]
     stop_loss: f64,
     #[serde(default)]
     #[allow(dead_code)]
     invalidation_condition: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_f64")]
     #[allow(dead_code)]
     confidence: f64,
     #[serde(default)]
     cancel_orders: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_f64")]
     #[allow(dead_code)]
     risk_usd: f64,
     #[serde(default)]
     #[allow(dead_code)]
     justification: String,
+}
+
+fn deserialize_f64<'de, D>(deserializer: D) -> std::result::Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct F64Visitor;
+    impl<'de> Visitor<'de> for F64Visitor {
+        type Value = f64;
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("数字或可解析的字符串")
+        }
+        fn visit_f64<E>(self, value: f64) -> Result<f64, E>
+        where
+            E: de::Error,
+        {
+            Ok(value)
+        }
+        fn visit_i64<E>(self, value: i64) -> Result<f64, E>
+        where
+            E: de::Error,
+        {
+            Ok(value as f64)
+        }
+        fn visit_u64<E>(self, value: u64) -> Result<f64, E>
+        where
+            E: de::Error,
+        {
+            Ok(value as f64)
+        }
+        fn visit_str<E>(self, value: &str) -> Result<f64, E>
+        where
+            E: de::Error,
+        {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(0.0);
+            }
+            trimmed
+                .parse::<f64>()
+                .map_err(|_| E::custom(format!("无法解析数字 {value}")))
+        }
+        fn visit_string<E>(self, value: String) -> Result<f64, E>
+        where
+            E: de::Error,
+        {
+            self.visit_str(&value)
+        }
+        fn visit_none<E>(self) -> Result<f64, E>
+        where
+            E: de::Error,
+        {
+            Ok(0.0)
+        }
+        fn visit_unit<E>(self) -> Result<f64, E>
+        where
+            E: de::Error,
+        {
+            Ok(0.0)
+        }
+    }
+    deserializer.deserialize_any(F64Visitor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_wrapped_operations_with_string_numbers() {
+        let raw = r#"{
+            "operations": [{
+                "signal": "buy_to_enter",
+                "coin": "BTC-USDT-SWAP",
+                "quantity": "0.01",
+                "leverage": "3",
+                "entry_price": "90000.5",
+                "profit_target": "90500",
+                "stop_loss": "89000"
+            }]
+        }"#;
+        let decisions = parse_ai_decisions(raw).expect("should parse decisions");
+        assert_eq!(decisions.len(), 1);
+        let decision = &decisions[0];
+        assert_eq!(decision.coin, "BTC-USDT-SWAP");
+        assert!((decision.quantity - 0.01).abs() < 1e-9);
+        assert!((decision.leverage - 3.0).abs() < 1e-9);
+        assert!((decision.entry_price - 90000.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parses_string_wrapped_response_array() {
+        let raw = r#"{"response": "[{\"signal\":\"hold\",\"coin\":\"ETH-USDT-SWAP\"}]" }"#;
+        let decisions = parse_ai_decisions(raw).expect("should parse wrapped response");
+        assert_eq!(decisions.len(), 1);
+        assert!(matches!(decisions[0].signal, DecisionSignal::Hold));
+        assert_eq!(decisions[0].coin, "ETH-USDT-SWAP");
+    }
 }
 
 #[derive(Debug, Deserialize, Copy, Clone, PartialEq, Eq)]

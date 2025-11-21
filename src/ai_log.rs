@@ -396,12 +396,12 @@ impl AiDecisionOperation {
     }
 
     fn parse_number(value: &serde_json::Value) -> Option<f64> {
-        let number = value.as_f64()?;
-        if number.is_finite() {
-            Some(number)
-        } else {
-            None
-        }
+        let number = match value {
+            serde_json::Value::Number(num) => num.as_f64()?,
+            serde_json::Value::String(text) => text.trim().parse::<f64>().ok()?,
+            _ => return None,
+        };
+        number.is_finite().then_some(number)
     }
 
     fn format_number(value: f64) -> String {

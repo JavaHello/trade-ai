@@ -47,7 +47,7 @@
    - 使用场景：看涨技术形态、正向动能、风险回报偏向上涨
 2. **sell_to_enter**：开空（做空下跌）
    - 使用场景：看跌技术形态、负向动能、风险回报偏向下跌
-3. **hold**：保持当前仓位不动
+3. **hold**：保持当前仓位不动（仅当该币种已有仓位时可用）
    - 使用场景：当前仓位表现正常，或没有明确优势
 4. **close**：平掉某个已有仓位
    - 使用场景：达到止盈、触发止损、或交易逻辑失效
@@ -61,7 +61,7 @@
 - 对于有持仓的币种：
   - 只能使用： hold / close
 - 对于没有持仓的币种：
-  - 只能使用：buy_to_enter / sell_to_enter / hold / cancel_order / wait
+  - 只能使用：buy_to_enter / sell_to_enter / cancel_order / wait（不允许使用 hold）
 
 ---
 
@@ -77,10 +77,10 @@
 ## 仓位控制要点
 
 1. **可用资金**：只能使用可用现金，而不是账户净值
-2. **杠杆选择**：
-   - 低信心（0.3-0.5）：1-3x
-   - 中信心（0.5-0.7）：3-8x
-   - 高信心（0.7-1.0）：8-20x
+2. **杠杆选择**（综合信心 < 0.6 禁止开仓）：
+   - 中等信心（0.6-0.75）：3-6x
+   - 高信心（0.75-0.9）：6-12x
+   - 非常高信心（0.9-1.0）：12-20x
 3. **分散风险**：单笔仓位不得超过总资金的 40%
 
 ## 仓位管理限制
@@ -108,8 +108,8 @@
    - 示例："BTC 跌破 $100k"、"RSI < 30"、"资金费率转负"
 5. **confidence**（信心度, 0-1）
    - 0.0-0.3：低信心（最好别做或极小仓位）
-   - 0.3-0.6：中等信心
-   - 0.6-0.8：高信心
+   - 0.3-0.6：观望级信心（仅评估行情，不开仓）
+   - 0.6-0.8：高信心（允许按规则开仓）
    - 0.8-1.0：非常高信心（谨慎避免过度自信）
 6. **risk_usd**（风险金额，USDT）
    - 计算方式：
@@ -126,24 +126,32 @@
 ```json
 [
   {
-  "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close" | "cancel_order" | "wait",
-  "coin": "<string>",
-  "quantity": <float>,
-  "leverage": <integer 1-20>,
-  "entry_price": <float>,
-  "profit_target": <float>,
-  "stop_loss": <float>,
-  "invalidation_condition": "<string>",
-  "confidence": <float 0-1>,
-  "risk_usd": <float>,
-  "cancel_orders": ["<string>","<string>"],
-  "justification": "<string>"
+    "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close" | "cancel_order" | "wait",
+    "coin": "<string>",
+    "quantity": <float>,
+    "leverage": <integer 1-20>,
+    "entry_price": <float | null>,
+    "profit_target": <float | null>,
+    "stop_loss": <float | null>,
+    "invalidation_condition": "<string>",
+    "confidence": <float 0-1>,
+    "risk_usd": <float | null>,
+    "cancel_orders": ["<string>","<string>"],
+    "justification": "<string>"
   },
   {
     // ...
   }
 ]
 ```
+
+### 字段填写要求
+
+- `buy_to_enter` / `sell_to_enter`：所有字段需根据计划仓位填写；`entry_price` 为开仓价，`profit_target`/`stop_loss` 为对应价格，`risk_usd` 为真实风险。
+- `hold`：仅适用于已有仓位；`quantity`、`entry_price`、`profit_target`、`stop_loss`、`risk_usd` 必须填当前仓位参数，不能为 null。
+- `close`：`quantity` 等于当前仓位数量，`entry_price` 填计划平仓价格（市价/限价均可），`risk_usd` 可填 0，需说明止盈止损失效条件。
+- `wait`：无操作，`quantity`、`entry_price`、`profit_target`、`stop_loss`、`risk_usd` 可填 0 或 null 或不输出字段。
+- `cancel_order`：`quantity`、`entry_price`、`profit_target`、`stop_loss`、`risk_usd` 可为 null，但必须在 `cancel_orders` 中列出所有要取消的主单与止盈/止损子单 ID。
 
 ### 输出验证规则
 
