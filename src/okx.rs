@@ -18,7 +18,7 @@ use tokio::time::{Duration, interval, sleep};
 use crate::command::{
     AccountBalance, AccountBalanceDelta, AccountSnapshot, CancelOrderRequest, CancelResponse,
     Command, PendingOrderInfo, PositionInfo, PricePoint, SetLeverageRequest, TradeEvent, TradeFill,
-    TradeOrderKind, TradeRequest, TradeResponse, TradeSide, TradingCommand,
+    TradeOrderKind, TradeOrderType, TradeRequest, TradeResponse, TradeSide, TradingCommand,
 };
 use crate::config::TradingConfig;
 
@@ -1314,11 +1314,19 @@ struct TradeOrderRequest {
 
 impl TradeOrderRequest {
     fn from_request(request: &TradeRequest, td_mode: &str) -> Self {
+        let ord_type = if let Some(ot) = request.ord_type.as_ref() {
+            match ot {
+                TradeOrderType::Market => "market",
+                TradeOrderType::Limit => "limit",
+            }
+        } else {
+            "limit"
+        };
         TradeOrderRequest {
             inst_id: request.inst_id.clone(),
             td_mode: td_mode.to_string(),
             side: request.side.as_okx_side().to_string(),
-            ord_type: "limit".to_string(),
+            ord_type: ord_type.to_string(),
             sz: format_float(request.size),
             px: format_float(request.price),
             pos_side: request

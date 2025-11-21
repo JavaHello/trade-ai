@@ -85,6 +85,11 @@ impl TradeOperator {
         }
     }
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TradeOrderType {
+    Market,
+    Limit,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRequest {
@@ -92,6 +97,7 @@ pub struct TradeRequest {
     pub side: TradeSide,
     pub price: f64,
     pub size: f64,
+    pub ord_type: Option<TradeOrderType>,
     pub pos_side: Option<String>,
     pub reduce_only: bool,
     pub tag: Option<String>,

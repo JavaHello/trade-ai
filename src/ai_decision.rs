@@ -8,7 +8,7 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 
 use crate::command::{
     AccountSnapshot, CancelOrderRequest, Command, PositionInfo, SetLeverageRequest, TradeOperator,
-    TradeOrderKind, TradeRequest, TradeSide, TradingCommand,
+    TradeOrderKind, TradeOrderType, TradeRequest, TradeSide, TradingCommand,
 };
 use crate::error_log::ErrorLogStore;
 use crate::okx::{MarketInfo, SharedAccountState};
@@ -156,6 +156,7 @@ impl<'a> DecisionExecutor<'a> {
             price,
             size: decision.quantity,
             pos_side: None,
+            ord_type: Some(TradeOrderType::Market),
             reduce_only: false,
             tag: Some(AI_TAG_ENTRY.to_string()),
             operator: self.ai_operator(),
@@ -194,6 +195,7 @@ impl<'a> DecisionExecutor<'a> {
                     price: decision.stop_loss,
                     size: entry.size,
                     pos_side: pos_side.clone(),
+                    ord_type: None,
                     reduce_only: true,
                     tag: Some(AI_TAG_STOP_LOSS.to_string()),
                     operator: self.ai_operator(),
@@ -218,6 +220,7 @@ impl<'a> DecisionExecutor<'a> {
                     price: decision.profit_target,
                     size: entry.size,
                     pos_side: pos_side.clone(),
+                    ord_type: None,
                     reduce_only: true,
                     tag: Some(AI_TAG_TAKE_PROFIT.to_string()),
                     operator: self.ai_operator(),
@@ -271,6 +274,7 @@ impl<'a> DecisionExecutor<'a> {
             price,
             size,
             pos_side,
+            ord_type: Some(TradeOrderType::Market),
             reduce_only: true,
             tag: Some(AI_TAG_CLOSE.to_string()),
             operator: self.ai_operator(),

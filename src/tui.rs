@@ -21,7 +21,7 @@ use crate::ai_log::{AiDecisionRecord, AiDecisionStore};
 use crate::command::{
     AccountBalance, AccountSnapshot, AiInsightRecord, CancelOrderRequest, Command,
     PendingOrderInfo, PositionInfo, PricePoint, SetLeverageRequest, TradeEvent, TradeOperator,
-    TradeOrderKind, TradeRequest, TradeSide, TradingCommand,
+    TradeOrderKind, TradeOrderType, TradeRequest, TradeSide, TradingCommand,
 };
 use crate::config::ConfiguredTimeZone;
 use crate::okx::MarketInfo;
@@ -3429,6 +3429,7 @@ impl TuiApp {
                     side: input.side,
                     price,
                     size,
+                    ord_type: Some(TradeOrderType::Limit),
                     pos_side: input.pos_side.clone(),
                     reduce_only: input.reduce_only,
                     tag: input.tag.clone(),

@@ -35,9 +35,6 @@
   ```
   交易数量 (张) = 交易金额 (USDT) / 买入价格 / 面值
   ```
-- **限价交易**: 你可以预测价格限价开仓
-  - 如预测价格将上涨，可使用低于当前市场价的限价单开多
-  - 如预测价格将下跌，可使用高于当前市场价的限价单开空
 
 ---
 
@@ -51,17 +48,14 @@
    - 使用场景：当前仓位表现正常，或没有明确优势
 4. **close**：平掉某个已有仓位
    - 使用场景：达到止盈、触发止损、或交易逻辑失效
-5. **cancel_order**：取消未成交的开多/开空限价单 (如果是已持仓的止盈止损单使用 close)
-   - 取消"buy_to_enter"或"sell_to_enter"限价单时必须同时取消对应的止盈止损单
-   - 使用场景：市场条件变化，需要调整未成交订单
-6. **wait**：暂不操作，等待下一次决策周期
+5. **wait**：暂不操作，等待下一次决策周期
 
 ## 动作要求 (严格遵守)
 
 - 对于有持仓的币种：
   - 只能使用： hold / close
 - 对于没有持仓的币种：
-  - 只能使用：buy_to_enter / sell_to_enter / cancel_order / wait（不允许使用 hold）
+  - 只能使用：buy_to_enter / sell_to_enter / wait（不允许使用 hold）
 
 ---
 
@@ -96,7 +90,7 @@
 每一笔开仓交易，你必须明确写出：
 
 1. **entry_price**（开仓价）
-   - 使用当前市场价或限价单价
+   - 使用当前市场价
 2. **profit_target**（止盈价）
    - 根据近期波动设定合理目标
    - 根据阻力位、斐波那契扩展、波动带等设定
@@ -126,7 +120,7 @@
 ```json
 [
   {
-    "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close" | "cancel_order" | "wait",
+    "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close" | "wait",
     "coin": "<string>",
     "quantity": <float>,
     "leverage": <integer 1-20>,
@@ -136,7 +130,6 @@
     "invalidation_condition": "<string>",
     "confidence": <float 0-1>,
     "risk_usd": <float | null>,
-    "cancel_orders": ["<string>","<string>"],
     "justification": "<string>"
   },
   {
@@ -149,9 +142,8 @@
 
 - `buy_to_enter` / `sell_to_enter`：所有字段需根据计划仓位填写；`entry_price` 为开仓价，`profit_target`/`stop_loss` 为对应价格，`risk_usd` 为真实风险。
 - `hold`：仅适用于已有仓位；`quantity`、`entry_price`、`profit_target`、`stop_loss`、`risk_usd` 必须填当前仓位参数，不能为 null。
-- `close`：`quantity` 等于当前仓位数量，`entry_price` 填计划平仓价格（市价/限价均可），`risk_usd` 可填 0，需说明止盈止损失效条件。
+- `close`：`quantity` 等于当前仓位数量，`entry_price` 填计划平仓价格（市价），`risk_usd` 可填 0，需说明止盈止损失效条件。
 - `wait`：无操作，`quantity`、`entry_price`、`profit_target`、`stop_loss`、`risk_usd` 可填 0 或 null 或不输出字段。
-- `cancel_order`：`quantity`、`entry_price`、`profit_target`、`stop_loss`、`risk_usd` 可为 null，但必须在 `cancel_orders` 中列出所有要取消的主单与止盈/止损子单 ID。
 
 ### 输出验证规则
 
@@ -162,7 +154,6 @@
 - `buy_to_enter`(多单) → 止盈高于开仓价，止损低于开仓价, `entry_price` ≤ 当前价格
 - `sell_to_enter`(空单) → 止盈低于开仓价，止损高于开仓价, `entry_price` ≥ 当前价格
 - `justification`(说明文字 ) ≤ 500 字符: **[指标事实] + [趋势判断/风险依据] + [最终决策依据]。** 使用中文输出
-- `cancel_orders`：仅在 signal=`cancel_order` 时使用，列出所有要取消的订单 ID
 
 ---
 
