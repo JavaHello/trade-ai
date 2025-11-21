@@ -72,6 +72,7 @@ pub struct InstrumentAnalytics {
     pub swing_macd: Vec<f64>,
     pub swing_rsi14: Vec<f64>,
     pub recent_candles_5m: Vec<KlineRecord>,
+    pub recent_candles_15m: Vec<KlineRecord>,
     pub recent_candles_4h: Vec<KlineRecord>,
     pub taker_volume_5m: Vec<TakerVolume>,
     pub long_short_account_ratio_5m: Vec<LongShortRatio>,
@@ -218,6 +219,7 @@ impl MarketDataFetcher {
             swing_macd: take_tail(&macd_swing, ANALYTICS_SERIES_TAIL),
             swing_rsi14: take_tail(&rsi14_swing, ANALYTICS_SERIES_TAIL),
             recent_candles_5m: take_tail_candles(&intraday_5m, RECENT_KLINE_TAIL),
+            recent_candles_15m: take_tail_candles(&intraday_15m, RECENT_KLINE_TAIL),
             recent_candles_4h: take_tail_candles(&swing, RECENT_KLINE_TAIL),
             taker_volume_5m,
             long_short_account_ratio_5m: take_tail(

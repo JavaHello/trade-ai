@@ -338,6 +338,7 @@ fn build_market_analytics_json(
         "funding_rate": optional_float(entry.funding_rate),
         "recent_candles": [
             build_kline_table_json(&entry.recent_candles_5m, "5m"),
+            build_kline_table_json(&entry.recent_candles_15m, "15m"),
             build_kline_table_json(&entry.recent_candles_4h, "4h"),
         ],
         "indicators": [
@@ -521,6 +522,7 @@ mod tests {
             oi_average: Some(950000.0),
             funding_rate: Some(0.0001),
             recent_candles_5m: vec![],
+            recent_candles_15m: vec![],
             intraday_1m_ema20: vec![49900.0, 50000.0, 50100.0],
             intraday_1m_macd: vec![8.0, 9.0, 10.5],
             intraday_1m_rsi7: vec![60.0, 62.0, 65.0],
