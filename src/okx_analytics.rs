@@ -15,6 +15,10 @@ const OPEN_INTEREST_ENDPOINT: &str = "https://www.okx.com/api/v5/public/open-int
 const OPEN_INTEREST_HISTORY_ENDPOINT: &str =
     "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history";
 const TAKER_VOLUME_ENDPOINT: &str = "https://www.okx.com/api/v5/rubik/stat/taker-volume-contract";
+
+const LONG_SHORT_ACCOUNT_RATIO_ENDPOINT: &str =
+    "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract";
+
 const ANALYTICS_INTRADAY_LIMIT: usize = 160;
 const ANALYTICS_SWING_LIMIT: usize = 120;
 const ANALYTICS_SERIES_TAIL: usize = 10;
@@ -96,22 +100,25 @@ struct OpenInterestStats {
     average: Option<f64>,
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LongShortRatioEntry {
+    ts: String,
+    long_short_acct_ratio: String,
+}
+
 pub struct MarketDataFetcher {
     http: Client,
-    trading_config: TradingConfig,
 }
 
 impl MarketDataFetcher {
-    pub fn new(trading_config: TradingConfig) -> Result<Self> {
+    pub fn new(_trading_config: TradingConfig) -> Result<Self> {
         let http = Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .read_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
             .build()?;
-        Ok(MarketDataFetcher {
-            http,
-            trading_config,
-        })
+        Ok(MarketDataFetcher { http })
     }
 
     pub async fn price_for_inst(&self, inst_id: &str) -> Result<f64> {
@@ -177,8 +184,7 @@ impl MarketDataFetcher {
         let swing_volume_avg = average_tail(&swing_volumes, VOLUME_AVG_PERIOD);
         let taker_volume_5m = self.fetch_taker_volume(inst_id, "5m").await?;
         let long_short_account_ratio_5m =
-            okx::fetch_long_short_account_ratio(&self.http, inst_id, "5m", &self.trading_config)
-                .await?;
+            self.fetch_long_short_account_ratio(inst_id, "5m").await?;
         Ok(InstrumentAnalytics {
             inst_id: inst_id.to_string(),
             symbol: inst_symbol(inst_id),
@@ -380,6 +386,39 @@ impl MarketDataFetcher {
         }
         volumes.sort_by_key(|v| v.timestamp_ms);
         Ok(volumes)
+    }
+
+    async fn fetch_long_short_account_ratio(
+        &self,
+        inst_id: &str,
+        period: &str,
+    ) -> Result<Vec<LongShortRatio>> {
+        let response: OkxResponse<Vec<LongShortRatioEntry>> = self
+            .http
+            .get(LONG_SHORT_ACCOUNT_RATIO_ENDPOINT)
+            .query(&[("instId", inst_id), ("period", period), ("limit", "10")])
+            .send()
+            .await
+            .with_context(|| format!("请求 {} 买卖成交量失败", inst_id))?
+            .json()
+            .await
+            .with_context(|| format!("解析 {} 买卖成交量失败", inst_id))?;
+        if response.code != "0" {
+            return Err(anyhow!(
+                "{} long-short-account-ratio-contract failed (code {}): {}",
+                inst_id,
+                response.code,
+                response.msg
+            ));
+        }
+        let mut ratios = Vec::new();
+        for entry in response.data {
+            let ts = entry.ts.parse().unwrap_or(0);
+            let ratio = parse_f64(&entry.long_short_acct_ratio).unwrap_or(0.0);
+            ratios.push(LongShortRatio { ts, ratio });
+        }
+        ratios.sort_by_key(|e| e.ts);
+        Ok(ratios)
     }
 }
 

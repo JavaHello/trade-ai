@@ -73,13 +73,6 @@ pub struct MarkPriceResponse {
     pub data: Vec<MarkPriceData>,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LongShortRatioEntry {
-    ts: String,
-    ratio: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct LongShortRatio {
     pub ts: i64,
@@ -126,8 +119,6 @@ const ACCOUNT_BALANCE_ENDPOINT: &str = "/api/v5/account/balance";
 const POSITIONS_ENDPOINT: &str = "/api/v5/account/positions";
 const ORDERS_PENDING_ENDPOINT: &str = "/api/v5/trade/orders-pending";
 const ORDERS_ALGO_PENDING_ENDPOINT: &str = "/api/v5/trade/orders-algo-pending";
-const LONG_SHORT_ACCOUNT_RATIO_ENDPOINT: &str =
-    "api/v5/rubik/stat/contracts/long-short-account-ratio";
 
 const MAX_CANDLE_LIMIT: usize = 300;
 type HmacSha256 = Hmac<Sha256>;
@@ -2067,33 +2058,6 @@ async fn fetch_account_balances(
     balance.delta =
         aggregate_balance_details(response.data.iter().flat_map(|entry| entry.details.iter()));
     Ok(balance)
-}
-
-pub async fn fetch_long_short_account_ratio(
-    client: &Client,
-    inst_id: &str,
-    period: &str,
-    config: &TradingConfig,
-) -> Result<Vec<LongShortRatio>, anyhow::Error> {
-    let query = vec![("ccy", inst_id.to_string()), ("period", period.to_string())];
-    let response: OkxResponse<Vec<LongShortRatioEntry>> =
-        signed_get(client, config, LONG_SHORT_ACCOUNT_RATIO_ENDPOINT, &query).await?;
-    if response.code != "0" {
-        return Err(anyhow!(
-            "okx long-short ratio error for {} (code {}): {}",
-            inst_id,
-            response.code,
-            response.msg
-        ));
-    }
-    let mut ratios = Vec::new();
-    for entry in response.data {
-        let ts = entry.ts.parse::<i64>().unwrap_or(0);
-        let ratio = parse_float_str(&entry.ratio).unwrap_or(0.0);
-        ratios.push(LongShortRatio { ts, ratio });
-    }
-    ratios.sort_by_key(|r| r.ts);
-    Ok(ratios)
 }
 
 fn parse_optional_float(value: Option<String>) -> Option<f64> {
