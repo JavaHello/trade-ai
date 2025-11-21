@@ -115,6 +115,11 @@ impl<'a> DecisionExecutor<'a> {
                 decision.entry_price
             ));
         }
+        let current_price = self
+            .market
+            .price_for_inst(&inst_id)
+            .await
+            .with_context(|| format!("获取 {} 最新价格失败", inst_id))?;
         let side = match decision.signal {
             DecisionSignal::BuyToEnter => TradeSide::Buy,
             DecisionSignal::SellToEnter => TradeSide::Sell,
@@ -122,10 +127,25 @@ impl<'a> DecisionExecutor<'a> {
                 return Err(anyhow!("信号 {:?} 不支持创建新仓位", decision.signal));
             }
         };
+        let price = if side == TradeSide::Buy {
+            if current_price < decision.entry_price {
+                current_price
+            } else {
+                decision.entry_price
+            }
+        } else if side == TradeSide::Sell {
+            if current_price > decision.entry_price {
+                current_price
+            } else {
+                decision.entry_price
+            }
+        } else {
+            return Err(anyhow!("无法确定 {} 的下单价格", inst_id));
+        };
         let request = TradeRequest {
             inst_id,
             side,
-            price: decision.entry_price,
+            price,
             size: decision.quantity,
             pos_side: None,
             reduce_only: false,
