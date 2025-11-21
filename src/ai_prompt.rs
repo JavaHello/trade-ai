@@ -405,7 +405,7 @@ fn format_series_json(values: &[f64]) -> Value {
 }
 
 fn format_timestamp_label(timestamp: Option<i64>, timezone: ConfiguredTimeZone) -> Option<String> {
-    timestamp.and_then(|ts| timezone.format_timestamp(ts, "%d %H:%M:%S"))
+    timestamp.and_then(|ts| timezone.format_timestamp(ts, "%Y-%m-%d %H:%M:%S"))
 }
 fn optional_float(value: Option<f64>) -> Value {
     match value {
