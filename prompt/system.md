@@ -155,8 +155,6 @@
 
 ### 输出验证规则
 
-- 对于“无持仓”的币种，且 signal = `wait`：
-  - `invalidation_condition` 可以写“何时考虑开仓”的条件，也可以写简短说明
 - 对于“有持仓”的币种，且 signal = `hold`：
   1.  `confidence` 必须提供
   2.  `invalidation_condition` 必须写明
