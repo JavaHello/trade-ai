@@ -117,7 +117,7 @@ fn build_snapshot(
         data.push_str("- open_interest_latest: 最新持仓量\n");
         data.push_str("- open_interest_average: 平均持仓量\n");
         data.push_str("- funding_rate: 资金费率\n");
-        data.push_str("- interval: 数据时间间隔\n\n");
+        data.push_str("- interval: 数据时间间隔\n");
         data.push_str("- recent_candles: 最近 K 线数据\n");
         data.push_str("- close_prices: 收盘价序列\n");
         data.push_str("- ema20/ema50: 指数移动平均线\n");
