@@ -69,11 +69,8 @@ pub struct InstrumentAnalytics {
     pub swing_rsi14: Vec<f64>,
     pub recent_candles_5m: Vec<KlineRecord>,
     pub recent_candles_4h: Vec<KlineRecord>,
-    pub taker_volume_4h: Vec<TakerVolume>,
     pub taker_volume_5m: Vec<TakerVolume>,
-
     pub long_short_account_ratio_5m: Vec<LongShortRatio>,
-    pub long_short_account_ratio_4h: Vec<LongShortRatio>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -179,12 +176,8 @@ impl MarketDataFetcher {
         let swing_volume_current = swing_volumes.last().copied();
         let swing_volume_avg = average_tail(&swing_volumes, VOLUME_AVG_PERIOD);
         let taker_volume_5m = self.fetch_taker_volume(inst_id, "5m").await?;
-        let taker_volume_4h = self.fetch_taker_volume(inst_id, "4H").await?;
         let long_short_account_ratio_5m =
             okx::fetch_long_short_account_ratio(&self.http, inst_id, "5m", &self.trading_config)
-                .await?;
-        let long_short_account_ratio_4h =
-            okx::fetch_long_short_account_ratio(&self.http, inst_id, "4H", &self.trading_config)
                 .await?;
         Ok(InstrumentAnalytics {
             inst_id: inst_id.to_string(),
@@ -220,10 +213,11 @@ impl MarketDataFetcher {
             swing_rsi14: take_tail(&rsi14_swing, ANALYTICS_SERIES_TAIL),
             recent_candles_5m: take_tail_candles(&intraday_5m, RECENT_KLINE_TAIL),
             recent_candles_4h: take_tail_candles(&swing, RECENT_KLINE_TAIL),
-            taker_volume_4h,
             taker_volume_5m,
-            long_short_account_ratio_5m,
-            long_short_account_ratio_4h,
+            long_short_account_ratio_5m: take_tail(
+                &long_short_account_ratio_5m,
+                ANALYTICS_SERIES_TAIL,
+            ),
         })
     }
 
@@ -466,7 +460,10 @@ struct TakerVolumeEntry {
     buy_vol: String,
 }
 
-fn take_tail(values: &[f64], count: usize) -> Vec<f64> {
+fn take_tail<T>(values: &[T], count: usize) -> Vec<T>
+where
+    T: Clone,
+{
     if count == 0 || values.is_empty() {
         Vec::new()
     } else if values.len() <= count {

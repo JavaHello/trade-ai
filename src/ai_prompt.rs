@@ -387,8 +387,6 @@ fn build_market_analytics_json(
                 "volume_avg": optional_float(entry.swing_volume_avg),
                 "macd": format_series_json(&entry.swing_macd),
                 "rsi14": format_series_json(&entry.swing_rsi14),
-                "taker_volume": build_taker_volume_json(&entry.taker_volume_4h),
-                "long_short_account_ratio": build_long_short_account_ratio_json(&entry.long_short_account_ratio_4h),
             }
         ]
     })
@@ -549,21 +547,8 @@ mod tests {
             swing_volume_avg: Some(900.0),
             swing_macd: vec![5.0, 7.0, 9.0],
             swing_rsi14: vec![55.0, 58.0, 62.0],
-            taker_volume_4h: vec![
-                TakerVolume {
-                    timestamp_ms: 1700000000000,
-                    buy: 600.0,
-                    sell: 400.0,
-                },
-                TakerVolume {
-                    timestamp_ms: 1700003600000,
-                    buy: 700.0,
-                    sell: 300.0,
-                },
-            ],
             taker_volume_5m: vec![],
             long_short_account_ratio_5m: vec![],
-            long_short_account_ratio_4h: vec![],
         }]
     }
 

@@ -2334,8 +2334,6 @@ where
         .send()
         .await
         .with_context(|| format!("requesting OKX {}", path))?
-        .error_for_status()
-        .with_context(|| format!("OKX status {}", path))?
         .json::<T>()
         .await
         .with_context(|| format!("decoding OKX response for {}", path))?;
