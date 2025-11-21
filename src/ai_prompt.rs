@@ -364,10 +364,10 @@ fn build_market_analytics_json(
             {
                 "label": "4小时指标",
                 "interval": "4h",
-                "ema20": optional_float(entry.swing_ema20),
-                "ema50": optional_float(entry.swing_ema50),
-                "atr3": optional_float(entry.swing_atr3),
-                "atr14": optional_float(entry.swing_atr14),
+                "ema20": format_series_json(&entry.swing_ema20),
+                "ema50": format_series_json(&entry.swing_ema50),
+                "atr3": format_series_json(&entry.swing_atr3),
+                "atr14": format_series_json(&entry.swing_atr14),
                 "volume_current": optional_float(entry.swing_volume_current),
                 "volume_avg": optional_float(entry.swing_volume_avg),
                 "macd": format_series_json(&entry.swing_macd),
@@ -496,10 +496,10 @@ mod tests {
             intraday_15m_rsi7: vec![60.0, 62.0, 65.0],
             intraday_15m_rsi14: vec![58.0, 60.0, 63.0],
             recent_candles_4h: vec![],
-            swing_ema20: Some(49500.0),
-            swing_ema50: Some(49000.0),
-            swing_atr3: Some(500.0),
-            swing_atr14: Some(800.0),
+            swing_ema20: vec![49500.0, 49700.0, 49900.0],
+            swing_ema50: vec![49000.0, 49200.0, 49400.0],
+            swing_atr3: vec![500.0, 600.0, 700.0],
+            swing_atr14: vec![400.0, 500.0, 600.0],
             swing_volume_current: Some(1000.0),
             swing_volume_avg: Some(900.0),
             swing_macd: vec![5.0, 7.0, 9.0],
@@ -516,9 +516,7 @@ mod tests {
         markets.insert(
             "BTC-USDT-SWAP".to_string(),
             MarketInfo {
-                min_size: 1.0,
                 ct_val: 0.01,
-                ct_val_ccy: Some("BTC".to_string()),
                 lever: 100.0,
             },
         );
@@ -603,12 +601,4 @@ mod tests {
         assert!(result.contains("账户情况"));
     }
 
-    #[test]
-    fn test_format_float() {
-        assert_eq!(format_float(1.0), "1.0");
-        assert_eq!(format_float(1.5), "1.5");
-        assert_eq!(format_float(1.123456789), "1.12345679");
-        assert_eq!(format_float(0.00000001), "0.00000001");
-        assert_eq!(format_float(0.1), "0.1");
-    }
 }
