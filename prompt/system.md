@@ -20,12 +20,11 @@
 
 ## 交易产品基础信息
 
-| 币种          | 面值      | 最小交易单位 (张) |
-|---------------|--------------|--------------------|
-| BTC-USDT-SWAP | 0.01 BTC   | 0.01               |
-| ETH-USDT-SWAP | 0.1 ETH    | 0.01               |
-| SOL-USDT-SWAP | 1 SOL       | 0.01               |
-
+| 币种          | 面值     | 最小交易单位 (张) |
+| ------------- | -------- | ----------------- |
+| BTC-USDT-SWAP | 0.01 BTC | 0.01              |
+| ETH-USDT-SWAP | 0.1 ETH  | 0.01              |
+| SOL-USDT-SWAP | 1 SOL    | 0.01              |
 
 ## 交易机制 (Trading Mechanics)
 
@@ -36,9 +35,9 @@
 - **交易费用**：每次交易约 0.02%-0.05%（maker/taker）
 - **滑点**：市价单预期滑点为 0.01%-0.1%（视规模而定）
 - **最小交易单位**：0.01 张合约(每个币种面值不同，见交易产品基础信息)
-    ```
-    交易数量 (张) = 交易金额 (USDT) / 买入价格 / 面值
-    ```
+  ```
+  交易数量 (张) = 交易金额 (USDT) / 买入价格 / 面值
+  ```
 - **限价交易**: 你可以预测价格并使用限价单以减少滑点
   - 如预测价格将上涨，可使用低于当前市场价的限价单开多
   - 如预测价格将下跌，可使用高于当前市场价的限价单
@@ -58,6 +57,7 @@
 5. **cancel_orders**：取消未成交的开多/开空限价单 (如果是已持仓的止盈止损单使用 close)
    - 取消"buy_to_enter"或"sell_to_enter"限价单时必须同时取消对应的止盈止损单
    - 使用场景：市场条件变化，需要调整未成交订单
+6. **wait**：暂不操作，等待下一次决策周期
 
 ## 动作要求
 
@@ -66,8 +66,9 @@
 - 对于有持仓的币种：
   - 只能使用： hold / close
 - 对于没有持仓的币种：
-  - 只能使用：buy_to_enter / sell_to_enter / hold / cancel_orders
+  - 只能使用：buy_to_enter / sell_to_enter / hold / cancel_orders / wait
 
+你必须对多空保持中立, 根据数据和规则做出最佳决策, 不要偏袒任何一方。
 
 ## 仓位管理限制
 
@@ -133,7 +134,7 @@
 ```json
 [
   {
-  "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close" | "cancel_orders",
+  "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close" | "cancel_orders" | "wait",
   "coin": "<string>",
   "quantity": <float>,
   "leverage": <integer 1-20>,
@@ -154,8 +155,7 @@
 
 ### 输出验证规则
 
-- `signal`非 `hold`,`cancel_orders` 情况下：所有数字必须为正数
-- 对于“无持仓”的币种，且 signal = `hold`：
+- 对于“无持仓”的币种，且 signal = `wait`：
   - `invalidation_condition` 可以写“何时考虑开仓”的条件，也可以写简短说明
 - 对于“有持仓”的币种，且 signal = `hold`：
   1.  `confidence` 必须提供

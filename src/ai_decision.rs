@@ -64,6 +64,7 @@ impl<'a> DecisionExecutor<'a> {
         for decision in decisions {
             match decision.signal {
                 DecisionSignal::Hold => continue,
+                DecisionSignal::Wait => continue,
                 DecisionSignal::BuyToEnter | DecisionSignal::SellToEnter => {
                     self.place_entry_order(&decision).await?
                 }
@@ -604,4 +605,5 @@ enum DecisionSignal {
     Hold,
     Close,
     CancelOrders,
+    Wait,
 }

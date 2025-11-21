@@ -302,6 +302,8 @@ pub enum AiDecisionSignal {
     SellToEnter,
     Hold,
     Close,
+    Cancel,
+    Wait,
 }
 
 impl AiDecisionSignal {
@@ -311,6 +313,8 @@ impl AiDecisionSignal {
             "sell_to_enter" => Some(AiDecisionSignal::SellToEnter),
             "hold" => Some(AiDecisionSignal::Hold),
             "close" => Some(AiDecisionSignal::Close),
+            "cancel_orders" => Some(AiDecisionSignal::Cancel),
+            "wait" => Some(AiDecisionSignal::Wait),
             _ => None,
         }
     }
@@ -321,6 +325,8 @@ impl AiDecisionSignal {
             AiDecisionSignal::SellToEnter => "卖出入场",
             AiDecisionSignal::Hold => "保持",
             AiDecisionSignal::Close => "平仓",
+            AiDecisionSignal::Cancel => "取消订单",
+            AiDecisionSignal::Wait => "等待",
         }
     }
 
@@ -330,6 +336,8 @@ impl AiDecisionSignal {
             AiDecisionSignal::SellToEnter => "卖出",
             AiDecisionSignal::Hold => "持有",
             AiDecisionSignal::Close => "平仓",
+            AiDecisionSignal::Cancel => "取消",
+            AiDecisionSignal::Wait => "等待",
         }
     }
 }
