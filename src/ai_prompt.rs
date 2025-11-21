@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use crate::ai_decision::{AI_TAG_CLOSE, AI_TAG_ENTRY, AI_TAG_STOP_LOSS, AI_TAG_TAKE_PROFIT};
 use crate::command::AccountSnapshot;
 use crate::config::ConfiguredTimeZone;
-use crate::okx::MarketInfo;
-use crate::okx_analytics::{InstrumentAnalytics, KlineRecord};
+use crate::okx::{LongShortRatio, MarketInfo};
+use crate::okx_analytics::{InstrumentAnalytics, KlineRecord, TakerVolume};
 
 pub const SYSTEM_PROMPT_PATH: &str = "prompt/system.md";
 const MAX_POSITIONS: usize = 12;
@@ -112,6 +112,21 @@ fn build_snapshot(
     // Market analytics
     if !analytics.is_empty() {
         data.push_str("## 市场分析:\n");
+        data.push_str("指标字段说明: \n");
+        data.push_str("- current_price: 当前价格\n");
+        data.push_str("- open_interest_latest: 最新持仓量\n");
+        data.push_str("- open_interest_average: 平均持仓量\n");
+        data.push_str("- funding_rate: 资金费率\n");
+        data.push_str("- interval: 数据时间间隔\n\n");
+        data.push_str("- recent_candles: 最近 K 线数据\n");
+        data.push_str("- close_prices: 收盘价序列\n");
+        data.push_str("- ema20/ema50: 指数移动平均线\n");
+        data.push_str("- macd: 移动平均收敛散度指标\n");
+        data.push_str("- rsi7/rsi14: 相对强弱指数\n");
+        data.push_str("- atr3/atr14: 平均真实波幅\n");
+        data.push_str("- taker_volume: 合约主动买入/卖出情况\n");
+        data.push_str("- long_short_account_ratio: 多空持仓账户数比率\n\n");
+        data.push_str("\n");
         for entry in analytics.iter() {
             data.push_str(&format!("### 产品: {} ({})\n", entry.inst_id, entry.symbol));
             let market_json = build_market_analytics_json(&entry, timezone);
@@ -345,11 +360,13 @@ fn build_market_analytics_json(
             {
                 "label": "5分钟指标",
                 "interval": "5m",
-                "prices": format_series_json(&entry.intraday_5m_prices),
+                "close_prices": format_series_json(&entry.intraday_5m_prices),
                 "ema20": format_series_json(&entry.intraday_5m_ema20),
                 "macd": format_series_json(&entry.intraday_5m_macd),
                 "rsi7": format_series_json(&entry.intraday_5m_rsi7),
                 "rsi14": format_series_json(&entry.intraday_5m_rsi14),
+                "taker_volume": build_taker_volume_json(&entry.taker_volume_5m),
+                "long_short_account_ratio": build_long_short_account_ratio_json(&entry.long_short_account_ratio_5m),
             },
             {
                 "label": "15分钟指标",
@@ -370,9 +387,39 @@ fn build_market_analytics_json(
                 "volume_avg": optional_float(entry.swing_volume_avg),
                 "macd": format_series_json(&entry.swing_macd),
                 "rsi14": format_series_json(&entry.swing_rsi14),
+                "taker_volume": build_taker_volume_json(&entry.taker_volume_4h),
+                "long_short_account_ratio": build_long_short_account_ratio_json(&entry.long_short_account_ratio_4h),
             }
         ]
     })
+}
+fn build_long_short_account_ratio_json(ratios: &Vec<LongShortRatio>) -> Value {
+    let ratio_list: Vec<Value> = ratios
+        .iter()
+        .map(|t| {
+            json!({
+                "t": format!("{}", (t.ts / 1000) as i64),
+                "ratios": format!("{:.2}", t.ratio),
+            })
+        })
+        .collect();
+
+    json!(ratio_list)
+}
+
+fn build_taker_volume_json(taker_volumes: &Vec<TakerVolume>) -> Value {
+    let volumes: Vec<Value> = taker_volumes
+        .iter()
+        .map(|t| {
+            json!({
+                "t": format!("{}", (t.timestamp_ms / 1000) as i64),
+                "s": format_float(t.buy),
+                "b": format_float(t.sell),
+            })
+        })
+        .collect();
+
+    json!(volumes)
 }
 
 fn build_kline_table_json(candles: &Vec<KlineRecord>, interval: &str) -> Value {
@@ -502,6 +549,21 @@ mod tests {
             swing_volume_avg: Some(900.0),
             swing_macd: vec![5.0, 7.0, 9.0],
             swing_rsi14: vec![55.0, 58.0, 62.0],
+            taker_volume_4h: vec![
+                TakerVolume {
+                    timestamp_ms: 1700000000000,
+                    buy: 600.0,
+                    sell: 400.0,
+                },
+                TakerVolume {
+                    timestamp_ms: 1700003600000,
+                    buy: 700.0,
+                    sell: 300.0,
+                },
+            ],
+            taker_volume_5m: vec![],
+            long_short_account_ratio_5m: vec![],
+            long_short_account_ratio_4h: vec![],
         }]
     }
 

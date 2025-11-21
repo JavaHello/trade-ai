@@ -4,13 +4,17 @@ use anyhow::{Context, Result, anyhow};
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::okx;
+use crate::{
+    config::TradingConfig,
+    okx::{self, LongShortRatio, OkxResponse},
+};
 
 const MARKET_CANDLES_ENDPOINT: &str = "https://www.okx.com/api/v5/market/candles";
 const FUNDING_RATE_ENDPOINT: &str = "https://www.okx.com/api/v5/public/funding-rate";
 const OPEN_INTEREST_ENDPOINT: &str = "https://www.okx.com/api/v5/public/open-interest";
 const OPEN_INTEREST_HISTORY_ENDPOINT: &str =
     "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history";
+const TAKER_VOLUME_ENDPOINT: &str = "https://www.okx.com/api/v5/rubik/stat/taker-volume-contract";
 const ANALYTICS_INTRADAY_LIMIT: usize = 160;
 const ANALYTICS_SWING_LIMIT: usize = 120;
 const ANALYTICS_SERIES_TAIL: usize = 10;
@@ -65,6 +69,18 @@ pub struct InstrumentAnalytics {
     pub swing_rsi14: Vec<f64>,
     pub recent_candles_5m: Vec<KlineRecord>,
     pub recent_candles_4h: Vec<KlineRecord>,
+    pub taker_volume_4h: Vec<TakerVolume>,
+    pub taker_volume_5m: Vec<TakerVolume>,
+
+    pub long_short_account_ratio_5m: Vec<LongShortRatio>,
+    pub long_short_account_ratio_4h: Vec<LongShortRatio>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TakerVolume {
+    pub timestamp_ms: i64,
+    pub buy: f64,
+    pub sell: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,16 +101,20 @@ struct OpenInterestStats {
 
 pub struct MarketDataFetcher {
     http: Client,
+    trading_config: TradingConfig,
 }
 
 impl MarketDataFetcher {
-    pub fn new() -> Result<Self> {
+    pub fn new(trading_config: TradingConfig) -> Result<Self> {
         let http = Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .read_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
             .build()?;
-        Ok(MarketDataFetcher { http })
+        Ok(MarketDataFetcher {
+            http,
+            trading_config,
+        })
     }
 
     pub async fn price_for_inst(&self, inst_id: &str) -> Result<f64> {
@@ -158,6 +178,14 @@ impl MarketDataFetcher {
         let current_price = self.price_for_inst(inst_id).await?;
         let swing_volume_current = swing_volumes.last().copied();
         let swing_volume_avg = average_tail(&swing_volumes, VOLUME_AVG_PERIOD);
+        let taker_volume_5m = self.fetch_taker_volume(inst_id, "5m").await?;
+        let taker_volume_4h = self.fetch_taker_volume(inst_id, "4H").await?;
+        let long_short_account_ratio_5m =
+            okx::fetch_long_short_account_ratio(&self.http, inst_id, "5m", &self.trading_config)
+                .await?;
+        let long_short_account_ratio_4h =
+            okx::fetch_long_short_account_ratio(&self.http, inst_id, "4H", &self.trading_config)
+                .await?;
         Ok(InstrumentAnalytics {
             inst_id: inst_id.to_string(),
             symbol: inst_symbol(inst_id),
@@ -192,6 +220,10 @@ impl MarketDataFetcher {
             swing_rsi14: take_tail(&rsi14_swing, ANALYTICS_SERIES_TAIL),
             recent_candles_5m: take_tail_candles(&intraday_5m, RECENT_KLINE_TAIL),
             recent_candles_4h: take_tail_candles(&swing, RECENT_KLINE_TAIL),
+            taker_volume_4h,
+            taker_volume_5m,
+            long_short_account_ratio_5m,
+            long_short_account_ratio_4h,
         })
     }
 
@@ -321,6 +353,40 @@ impl MarketDataFetcher {
         }
         Ok(values)
     }
+
+    async fn fetch_taker_volume(&self, inst_id: &str, period: &str) -> Result<Vec<TakerVolume>> {
+        let response: OkxResponse<Vec<TakerVolumeEntry>> = self
+            .http
+            .get(TAKER_VOLUME_ENDPOINT)
+            .query(&[("instId", inst_id), ("period", period), ("limit", "10")])
+            .send()
+            .await
+            .with_context(|| format!("请求 {} 买卖成交量失败", inst_id))?
+            .json()
+            .await
+            .with_context(|| format!("解析 {} 买卖成交量失败", inst_id))?;
+        if response.code != "0" {
+            return Err(anyhow!(
+                "{} taker volume failed (code {}): {}",
+                inst_id,
+                response.code,
+                response.msg
+            ));
+        }
+        let mut volumes = Vec::new();
+        for entry in response.data {
+            let timestamp_ms = parse_f64(&entry.ts).unwrap_or(0.0) as i64;
+            let buy = parse_f64(&entry.buy_vol).unwrap_or(0.0);
+            let sell = parse_f64(&entry.sell_vol).unwrap_or(0.0);
+            volumes.push(TakerVolume {
+                timestamp_ms,
+                buy,
+                sell,
+            });
+        }
+        volumes.sort_by_key(|v| v.timestamp_ms);
+        Ok(volumes)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +456,14 @@ struct OpenInterestHistoryResponse {
     code: String,
     msg: String,
     data: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TakerVolumeEntry {
+    ts: String,
+    sell_vol: String,
+    buy_vol: String,
 }
 
 fn take_tail(values: &[f64], count: usize) -> Vec<f64> {

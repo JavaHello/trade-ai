@@ -15,7 +15,7 @@ use crate::ai_prompt::{
     load_system_prompt,
 };
 use crate::command::{AccountSnapshot, AiInsightRecord, Command, TradeEvent, TradingCommand};
-use crate::config::{ConfiguredTimeZone, DeepseekConfig};
+use crate::config::{ConfiguredTimeZone, DeepseekConfig, TradingConfig};
 use crate::error_log::ErrorLogStore;
 use crate::okx::{MarketInfo, SharedAccountState};
 use crate::okx_analytics::{InstrumentAnalytics, MarketDataFetcher};
@@ -48,11 +48,12 @@ impl DeepseekReporter {
         markets: HashMap<String, MarketInfo>,
         start_timestamp_ms: i64,
         order_tx: Option<mpsc::Sender<TradingCommand>>,
+        trading_config: TradingConfig,
         timezone: ConfiguredTimeZone,
     ) -> Result<Self> {
         let system_prompt = load_system_prompt()?;
         let client = DeepseekClient::new(&config, system_prompt.clone())?;
-        let market = MarketDataFetcher::new()?;
+        let market = MarketDataFetcher::new(trading_config)?;
         let inst_ids = normalize_inst_ids(inst_ids);
         let performance = PerformanceTracker::new(start_timestamp_ms);
         let leverage_cache = RwLock::new(initial_leverage_cache(&markets));
