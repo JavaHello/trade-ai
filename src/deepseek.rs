@@ -37,6 +37,7 @@ pub struct DeepseekReporter {
     error_log: ErrorLogStore,
     system_prompt: String,
     timezone: ConfiguredTimeZone,
+    operator_label: String,
 }
 
 impl DeepseekReporter {
@@ -52,7 +53,8 @@ impl DeepseekReporter {
         timezone: ConfiguredTimeZone,
     ) -> Result<Self> {
         let system_prompt = load_system_prompt()?;
-        let client = DeepseekClient::new(&config, system_prompt.clone())?;
+        let operator_label = config.provider_label();
+        let client = DeepseekClient::new(&config, system_prompt.clone(), operator_label.clone())?;
         let market = MarketDataFetcher::new(trading_config)?;
         let inst_ids = normalize_inst_ids(inst_ids);
         let performance = PerformanceTracker::new(start_timestamp_ms);
@@ -72,6 +74,7 @@ impl DeepseekReporter {
             error_log,
             system_prompt,
             timezone,
+            operator_label,
         })
     }
 
@@ -81,7 +84,7 @@ impl DeepseekReporter {
             tokio::select! {
                 _ = time::sleep(delay) => {
                     if let Err(err) = self.report_once().await {
-                        let _ = self.tx.send(Command::Error(format!("Deepseek 分析失败: {err}")));
+                        let _ = self.tx.send(Command::Error(format!("{} 分析失败: {err}", self.operator_label)));
                     }
                 }
                 message = exit_rx.recv() => match message {
@@ -173,6 +176,7 @@ impl DeepseekReporter {
             self.order_tx.clone(),
             &self.leverage_cache,
             self.error_log.clone(),
+            self.operator_label.clone(),
         )
     }
 
@@ -371,10 +375,11 @@ struct DeepseekClient {
     api_key: String,
     model: String,
     system_prompt: String,
+    display_name: String,
 }
 
 impl DeepseekClient {
-    fn new(config: &DeepseekConfig, system_prompt: String) -> Result<Self> {
+    fn new(config: &DeepseekConfig, system_prompt: String, display_name: String) -> Result<Self> {
         Ok(DeepseekClient {
             http: ClientBuilder::new()
                 .connect_timeout(Duration::from_secs(5))
@@ -385,6 +390,7 @@ impl DeepseekClient {
             api_key: config.api_key.clone(),
             model: config.model.clone(),
             system_prompt,
+            display_name,
         })
     }
 
@@ -407,24 +413,31 @@ impl DeepseekClient {
                 r#type: "json_object".to_string(),
             }),
         };
-        let response = self
+        let builder = self
             .http
             .post(url)
             .bearer_auth(&self.api_key)
-            .json(&request)
+            .json(&request);
+        let response = builder
             .send()
             .await
-            .context("请求 Deepseek API 失败")?;
+            .with_context(|| format!("请求 {} API 失败", self.display_name))?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Deepseek 返回错误: {} - {}", status, body));
+            return Err(anyhow!(
+                "{} 返回错误: {} - {}",
+                self.display_name,
+                status,
+                body
+            ));
         }
         let response_text = response.text().await.unwrap_or_default();
         let completion: ChatCompletionResponse =
             serde_json::from_str(&response_text).map_err(|err| {
                 anyhow!(
-                    "解析 Deepseek 响应失败: {}\n响应原文:\n{}",
+                    "解析 {} 响应失败: {}\n响应原文:\n{}",
+                    self.display_name,
                     err,
                     response_text
                 )
@@ -433,10 +446,10 @@ impl DeepseekClient {
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("Deepseek 响应中缺少内容"))?;
+            .ok_or_else(|| anyhow!("{} 响应中缺少内容", self.display_name))?;
         let content = choice.message.content.trim().to_string();
         if content.is_empty() {
-            Err(anyhow!("Deepseek 响应为空"))
+            Err(anyhow!("{} 响应为空", self.display_name))
         } else {
             Ok(content)
         }

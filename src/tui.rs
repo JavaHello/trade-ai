@@ -180,6 +180,7 @@ struct TradeState {
     markets: HashMap<String, MarketInfo>,
     balance: AccountBalance,
     ai_enabled: bool,
+    ai_label: Option<String>,
 }
 
 impl TradeState {
@@ -189,6 +190,7 @@ impl TradeState {
         ai_store: Option<AiDecisionStore>,
         markets: HashMap<String, MarketInfo>,
         ai_enabled: bool,
+        ai_label: Option<String>,
     ) -> Self {
         TradeState {
             selected_inst_idx: 0,
@@ -217,6 +219,7 @@ impl TradeState {
             markets,
             balance: AccountBalance::default(),
             ai_enabled,
+            ai_label,
         }
     }
 
@@ -427,6 +430,10 @@ impl TradeState {
 
     fn ai_panel_enabled(&self) -> bool {
         self.ai_enabled
+    }
+
+    fn ai_label(&self) -> &str {
+        self.ai_label.as_deref().unwrap_or("AI")
     }
 
     fn ai_detail_active(&self) -> bool {
@@ -973,6 +980,7 @@ impl TuiApp {
         markets: HashMap<String, MarketInfo>,
         order_tx: Option<mpsc::Sender<TradingCommand>>,
         ai_enabled: bool,
+        ai_label: Option<String>,
         wait_for_markets: bool,
         timezone: ConfiguredTimeZone,
     ) -> TuiApp {
@@ -1017,7 +1025,14 @@ impl TuiApp {
             y_zoom: 1.0,
             multi_axis: false,
             view_mode: ViewMode::Chart,
-            trade: TradeState::new(order_tx, Some(log_store), ai_store, markets, ai_enabled),
+            trade: TradeState::new(
+                order_tx,
+                Some(log_store),
+                ai_store,
+                markets,
+                ai_enabled,
+                ai_label,
+            ),
             exit_confirmation: false,
             loading_overlay,
             timezone,
@@ -1143,11 +1158,12 @@ impl TuiApp {
                                     "记录 AI 决策失败: {err}"
                                 ));
                             } else {
+                                let ai_label = self.trade.ai_label().to_string();
                                 let summary = self
                                     .trade
                                     .latest_ai_summary()
                                     .unwrap_or_else(|| "收到新的 AI 决策".to_string());
-                                self.status_message = Some(format!("Deepseek: {summary}"));
+                                self.status_message = Some(format!("{ai_label}: {summary}"));
                                 self.status_visible_until =
                                     Some(Instant::now() + Duration::from_secs(15));
                                 self.status_is_error = false;
@@ -1866,7 +1882,11 @@ impl TuiApp {
     }
 
     fn render_ai_panel(&mut self, frame: &mut Frame, area: Rect) {
-        let title = format!("AI 决策 {}", self.trade.ai_insight_count());
+        let title = format!(
+            "{} 决策 {}",
+            self.trade.ai_label(),
+            self.trade.ai_insight_count()
+        );
         let mut block = Block::bordered().title(title);
         if self.trade.focus == TradeFocus::AiInsights {
             block = block.border_style(Style::default().fg(Color::LightMagenta));
@@ -1885,9 +1905,12 @@ impl TuiApp {
         if list_visible == 0 {
             lines.push(Line::from("窗口高度不足，无法显示 AI 决策"));
         } else if !self.trade.ai_panel_enabled() {
-            lines.push(Line::from("未启用 Deepseek"));
+            lines.push(Line::from("未启用 AI"));
         } else if self.trade.ai_insight_count() == 0 {
-            lines.push(Line::from("等待 Deepseek 决策 · 按 o 查看原始提示"));
+            lines.push(Line::from(format!(
+                "等待 {} 决策 · 按 o 查看原始提示",
+                self.trade.ai_label()
+            )));
         } else {
             let fixed_columns = AI_INDEX_COLUMN_WIDTH + AI_TIME_COLUMN_WIDTH;
             let spacing = 3; // four columns -> three gaps
@@ -2475,7 +2498,7 @@ impl TuiApp {
             .scroll((scroll, 0))
             .block(
                 Block::bordered()
-                    .title("Deepseek 提示详情")
+                    .title(format!("{} 提示详情", self.trade.ai_label()))
                     .border_style(Style::default().fg(Color::LightMagenta)),
             );
         frame.render_widget(Clear, popup);

@@ -9,7 +9,7 @@
 - 预加载一定窗口的历史数据，方便刚启动时快速回看走势
 - 将成交明细、AI 决策、错误信息持久化到本地 JSONL 文件，TUI 交易页可随时回看
 - 在交易视图中可直接向 OKX 下单，指令会发送到 OKX 交易 API
-- 可选启用 Deepseek AI，周期性读取账户/技术指标并可自动生成交易指令
+- 可选启用 AI（默认 Deepseek，也可走 OpenRouter 选择其他模型），周期性读取账户/技术指标并可自动生成交易指令
   - 提示词来源: 基于 [nof1 ai 逆向](https://gist.github.com/wquguru/7d268099b8c04b7e5b6ad6fae922ae83) 修改
 
 ## 环境要求
@@ -53,15 +53,14 @@ cargo run --release -- \
 
 ## AI 智能分析
 
-在同时提供 OKX 与 Deepseek API 时，`trade-ai` 会按照设定频率（默认 3 分钟）执行以下流程：
+在同时提供 OKX 与 AI（Deepseek 或 OpenRouter）参数时，`trade-ai` 会按照设定频率（默认 5 分钟）执行以下流程：
 
 1. 抓取账户快照：持仓、挂单、资金、最近成交（来自本地 `trade_logs.jsonl`）。
 2. 采集行情指标：EMA/MACD/RSI/ATR、资金费率、未平仓合约数等（`okx_analytics.rs`）。
-3. 生成上下文并发送给 Deepseek，请求中文结论及结构化 JSON 决策。
+3. 生成上下文并发送给所选模型，请求中文结论及结构化 JSON 决策。
 4. 在 TUI 底部展示最近一条摘要，并在交易页 `AI` 面板里保留完整记录。
 
-当 Deepseek 返回有效的 JSON 信号时，程序会做安全检查：验证交易对、数量粒度、止盈/止损方向等，然后通过内置
-OKX 客户端执行下列动作：
+当 AI 返回有效的 JSON 信号时，程序会做安全检查：验证交易对、数量粒度、止盈/止损方向等，然后通过内置 OKX 客户端执行下列动作：
 
 - **建仓**：按最新 `mark-price` 生成限价单，可附带杠杆与标签。
 - **保护单**：当决策提供目标价/止损价时，会自动派发止盈、止损单。
@@ -69,12 +68,12 @@ OKX 客户端执行下列动作：
 - **杠杆同步**：若要求的杠杆与当前不符，会先发送 `SetLeverage`。
 
 所有 AI 请求/响应会写入 `ai_decisions.jsonl`，TUI 启动时会加载最近 64 条方便排查。
-若未提供 OKX API（即没有交易令牌），Deepseek 仍会给出文字分析，但不会触发任何下单操作。
+若未提供 OKX API（即没有交易令牌），AI 仍会给出文字分析，但不会触发任何下单操作。
 
-> ⚠️ Deepseek 具备实盘下单能力。请确认 API 权限、交易模式（实盘/模拟）和杠杆限制，必要时在 OKX 侧设置更细的
+> ⚠️ AI 具备实盘下单能力。请确认 API 权限、交易模式（实盘/模拟）和杠杆限制，必要时在 OKX 侧设置更细的
 > 风控（子账户、资金限额）后再开启。
 
-可以通过环境变量或命令行参数启用：
+### 开启 Deepseek（默认）
 
 ```bash
 cargo run --release -- \
@@ -85,14 +84,30 @@ cargo run --release -- \
   --deepseek-interval 10m
 ```
 
+### 通过 OpenRouter 选择其他模型
+
+```bash
+cargo run --release -- \
+  --ai-provider openrouter \
+  --okx-api-key "$OKX_API_KEY" \
+  --okx-api-secret "$OKX_API_SECRET" \
+  --okx-api-passphrase "$OKX_API_PASSPHRASE" \
+  --openrouter-api-key "$OPENROUTER_API_KEY" \
+  --openrouter-model "openai/gpt-4o-mini"
+```
+
 支持的参数：
 
-- `--deepseek-api-key` / `DEEPSEEK_API_KEY`：Deepseek API Key（必填）
+- `--ai-provider` / `AI_PROVIDER`：`deepseek`（默认）或 `openrouter`
+- `--deepseek-api-key` / `DEEPSEEK_API_KEY`：Deepseek API Key
 - `--deepseek-model` / `DEEPSEEK_MODEL`：模型名称，默认 `deepseek-chat`
 - `--deepseek-endpoint` / `DEEPSEEK_API_BASE`：API 基础地址，默认 `https://api.deepseek.com`
-- `--deepseek-interval`：提交频率（如 `5m`、`15m`、`1h`）
+- `--openrouter-api-key` / `OPENROUTER_API_KEY`：OpenRouter API Key
+- `--openrouter-model` / `OPENROUTER_MODEL`：模型名称（默认 `gpt-4o-mini`，可自选如 `openai/gpt-4o-mini`、`anthropic/claude-3.5-sonnet`）
+- `--openrouter-endpoint` / `OPENROUTER_API_BASE`：OpenRouter API 基础地址，默认 `https://openrouter.ai/api/v1`
+- `--deepseek-interval`：提交频率（如 `5m`、`15m`、`1h`），两种提供商共用
 
-Deepseek 集成仅在成功加载 OKX 账户信息后激活，若账户数据为空则会跳过本次请求。
+AI 集成仅在成功加载 OKX 账户信息后激活，若账户数据为空则会跳过本次请求。
 
 ## 快速开始
 

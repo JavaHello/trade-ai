@@ -55,6 +55,15 @@ pub struct CliParams {
     #[clap(long = "deepseek-api-key", env = "DEEPSEEK_API_KEY")]
     pub deepseek_api_key: Option<String>,
 
+    /// AI provider used for analysis (deepseek or openrouter)
+    #[clap(
+        long = "ai-provider",
+        env = "AI_PROVIDER",
+        default_value = "deepseek",
+        value_parser = ["deepseek", "openrouter"]
+    )]
+    pub ai_provider: String,
+
     /// Deepseek model name for chat completions
     #[clap(
         long = "deepseek-model",
@@ -71,13 +80,33 @@ pub struct CliParams {
     )]
     pub deepseek_endpoint: String,
 
-    /// Interval between Deepseek summaries (e.g., 3m, 15m, 1h)
+    /// OpenRouter API key used for AI analysis of account states
+    #[clap(long = "openrouter-api-key", env = "OPENROUTER_API_KEY")]
+    pub openrouter_api_key: Option<String>,
+
+    /// OpenRouter model name for chat completions
     #[clap(
-        long = "deepseek-interval",
-        value_name = "DURATION",
-        default_value = "3m"
+        long = "openrouter-model",
+        env = "OPENROUTER_MODEL",
+        default_value = "deepseek/deepseek-chat-v3.1"
     )]
-    pub deepseek_interval: DurationSpec,
+    pub openrouter_model: String,
+
+    /// OpenRouter endpoint base URL (default https://openrouter.ai/api/v1)
+    #[clap(
+        long = "openrouter-endpoint",
+        env = "OPENROUTER_API_BASE",
+        default_value = "https://openrouter.ai/api/v1"
+    )]
+    pub openrouter_endpoint: String,
+
+    /// Interval between AI decisions (e.g., 5m, 15m)
+    #[clap(
+        long = "decision_interval",
+        value_name = "DURATION",
+        default_value = "5m"
+    )]
+    decision_interval: DurationSpec,
 }
 
 #[derive(Clone, Debug)]
@@ -156,22 +185,51 @@ impl CliParams {
         })
     }
 
-    pub fn deepseek_config(&self) -> Option<DeepseekConfig> {
-        let api_key = self.deepseek_api_key.as_ref()?.trim();
-        if api_key.is_empty() {
-            return None;
+    pub fn ai_config(&self) -> Option<DeepseekConfig> {
+        let provider = parse_ai_provider(&self.ai_provider);
+        match provider {
+            AiProvider::Deepseek => {
+                let api_key = self.deepseek_api_key.as_ref()?.trim();
+                if api_key.is_empty() {
+                    return None;
+                }
+                let endpoint =
+                    normalize_endpoint(self.deepseek_endpoint.trim(), DEFAULT_DEEPSEEK_ENDPOINT);
+                let model = self.deepseek_model.trim();
+                if model.is_empty() {
+                    return None;
+                }
+                Some(DeepseekConfig {
+                    api_key: api_key.to_string(),
+                    endpoint,
+                    model: model.to_string(),
+                    interval: self.decision_interval.as_duration(),
+                    provider,
+                })
+            }
+            AiProvider::OpenRouter => {
+                let api_key = if let Some(key) = &self.openrouter_api_key {
+                    key.trim()
+                } else {
+                    return None;
+                };
+                let endpoint = normalize_endpoint(
+                    self.openrouter_endpoint.trim(),
+                    DEFAULT_OPENROUTER_ENDPOINT,
+                );
+                let model = self.openrouter_model.trim();
+                if model.is_empty() {
+                    return None;
+                }
+                Some(DeepseekConfig {
+                    api_key: api_key.to_string(),
+                    endpoint,
+                    model: model.to_string(),
+                    interval: self.decision_interval.as_duration(),
+                    provider,
+                })
+            }
         }
-        let endpoint = normalize_endpoint(self.deepseek_endpoint.trim());
-        let model = self.deepseek_model.trim();
-        if model.is_empty() {
-            return None;
-        }
-        Some(DeepseekConfig {
-            api_key: api_key.to_string(),
-            endpoint,
-            model: model.to_string(),
-            interval: self.deepseek_interval.as_duration(),
-        })
     }
 }
 
@@ -252,12 +310,39 @@ pub struct DeepseekConfig {
     pub endpoint: String,
     pub model: String,
     pub interval: Duration,
+    pub provider: AiProvider,
 }
 
-fn normalize_endpoint(value: &str) -> String {
+impl DeepseekConfig {
+    pub fn provider_label(&self) -> String {
+        match self.provider {
+            AiProvider::Deepseek => "Deepseek",
+            AiProvider::OpenRouter => "OpenRouter",
+        }
+        .to_string()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiProvider {
+    Deepseek,
+    OpenRouter,
+}
+
+const DEFAULT_DEEPSEEK_ENDPOINT: &str = "https://api.deepseek.com";
+const DEFAULT_OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1";
+
+fn parse_ai_provider(value: &str) -> AiProvider {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "openrouter" => AiProvider::OpenRouter,
+        _ => AiProvider::Deepseek,
+    }
+}
+
+fn normalize_endpoint(value: &str, default_base: &str) -> String {
     let trimmed = value.trim().trim_end_matches('/');
     if trimmed.is_empty() {
-        "https://api.deepseek.com".to_string()
+        default_base.to_string()
     } else {
         trimmed.to_string()
     }

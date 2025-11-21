@@ -14,7 +14,6 @@ use crate::error_log::ErrorLogStore;
 use crate::okx::{MarketInfo, SharedAccountState};
 use crate::okx_analytics::MarketDataFetcher;
 
-pub const AI_OPERATOR_NAME: &str = "Deepseek";
 pub const AI_TAG_ENTRY: &str = "dsentry";
 pub const AI_TAG_STOP_LOSS: &str = "dssl";
 pub const AI_TAG_TAKE_PROFIT: &str = "dstp";
@@ -29,6 +28,7 @@ pub struct DecisionExecutor<'a> {
     order_tx: Option<mpsc::Sender<TradingCommand>>,
     leverage_cache: &'a RwLock<HashMap<LeverageKey, f64>>,
     error_log: ErrorLogStore,
+    operator_name: String,
 }
 
 impl<'a> DecisionExecutor<'a> {
@@ -40,6 +40,7 @@ impl<'a> DecisionExecutor<'a> {
         order_tx: Option<mpsc::Sender<TradingCommand>>,
         leverage_cache: &'a RwLock<HashMap<LeverageKey, f64>>,
         error_log: ErrorLogStore,
+        operator_name: String,
     ) -> Self {
         DecisionExecutor {
             state,
@@ -49,7 +50,12 @@ impl<'a> DecisionExecutor<'a> {
             order_tx,
             leverage_cache,
             error_log,
+            operator_name,
         }
+    }
+
+    fn ai_operator(&self) -> TradeOperator {
+        ai_operator_name(&self.operator_name)
     }
 
     pub async fn execute(&self, response: &str) -> Result<()> {
@@ -152,7 +158,7 @@ impl<'a> DecisionExecutor<'a> {
             pos_side: None,
             reduce_only: false,
             tag: Some(AI_TAG_ENTRY.to_string()),
-            operator: ai_operator(),
+            operator: self.ai_operator(),
             leverage: if decision.leverage > 0.0 {
                 Some(decision.leverage)
             } else {
@@ -190,7 +196,7 @@ impl<'a> DecisionExecutor<'a> {
                     pos_side: pos_side.clone(),
                     reduce_only: true,
                     tag: Some(AI_TAG_STOP_LOSS.to_string()),
-                    operator: ai_operator(),
+                    operator: self.ai_operator(),
                     leverage,
                     kind: TradeOrderKind::StopLoss,
                 };
@@ -214,7 +220,7 @@ impl<'a> DecisionExecutor<'a> {
                     pos_side: pos_side.clone(),
                     reduce_only: true,
                     tag: Some(AI_TAG_TAKE_PROFIT.to_string()),
-                    operator: ai_operator(),
+                    operator: self.ai_operator(),
                     leverage,
                     kind: TradeOrderKind::TakeProfit,
                 };
@@ -267,7 +273,7 @@ impl<'a> DecisionExecutor<'a> {
             pos_side,
             reduce_only: true,
             tag: Some(AI_TAG_CLOSE.to_string()),
-            operator: ai_operator(),
+            operator: self.ai_operator(),
             leverage: position.lever,
             kind: TradeOrderKind::Regular,
         };
@@ -293,7 +299,8 @@ impl<'a> DecisionExecutor<'a> {
             .collect();
         if orders.is_empty() {
             let _ = self.tx.send(Command::Error(format!(
-                "Deepseek 未找到 {inst_id} 的 AI 挂单可撤，已忽略撤单信号"
+                "{} 未找到 {inst_id} 的 AI 挂单可撤，已忽略撤单信号",
+                self.operator_name
             )));
             return Ok(());
         }
@@ -301,7 +308,7 @@ impl<'a> DecisionExecutor<'a> {
             let request = CancelOrderRequest {
                 inst_id: order.inst_id.clone(),
                 ord_id: order.ord_id.clone(),
-                operator: ai_operator(),
+                operator: self.ai_operator(),
                 pos_side: order.pos_side.clone(),
                 kind: order.kind,
             };
@@ -408,8 +415,8 @@ impl<'a> DecisionExecutor<'a> {
             TradeSide::Sell => "做空",
         };
         let _ = self.tx.send(Command::Error(format!(
-            "Deepseek {inst_id} {label} 价格 {:.4} 与 {direction} 方向不符（{expectation}），已忽略",
-            price
+            "{} {inst_id} {label} 价格 {:.4} 与 {direction} 方向不符（{expectation}），已忽略",
+            self.operator_name, price
         )));
     }
 
@@ -530,9 +537,9 @@ fn is_valid_stop_loss(side: TradeSide, entry_price: f64, stop: f64) -> bool {
     }
 }
 
-fn ai_operator() -> TradeOperator {
+fn ai_operator_name(name: &str) -> TradeOperator {
     TradeOperator::Ai {
-        name: Some(AI_OPERATOR_NAME.to_string()),
+        name: Some(name.to_string()),
     }
 }
 
@@ -588,7 +595,6 @@ fn parse_ai_decisions(raw: &str) -> Result<Vec<AiDecisionPayload>> {
         _ => Err(anyhow!("AI 决策必须是 JSON 对象或数组")),
     }
 }
-
 
 #[derive(Debug, Deserialize)]
 struct AiDecisionPayload {
