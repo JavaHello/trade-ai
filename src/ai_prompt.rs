@@ -105,9 +105,9 @@ fn build_snapshot(
     let mut data = String::new();
     data.push_str("当前时间: ");
     data.push_str(&current_time);
-    data.push_str("\n");
-    data.push_str("下方为您提供各种状态数据、价格数据和预测信号，助您发掘超额收益。再下方是您当前的账户信息，包括账户价值、业绩、持仓等。\n\n");
-    data.push_str("⚠️ 所有数组、K线均按时间从旧 → 新排列（与系统说明一致）。\n");
+    data.push_str("\n\n");
+    data.push_str("下方为您提供 k线, ema20, ema50, rsi7, rsi7 等数据，助您发掘超额收益。再下方是您当前的账户信息，包括账户价值、业绩、持仓等。\n\n");
+    data.push_str("所有数组、K线均按时间从旧 → 新排列（与系统说明一致）。\n");
 
     // Market analytics
     if !analytics.is_empty() {
@@ -123,10 +123,25 @@ fn build_snapshot(
 
     // Balance
     data.push_str("## 账户情况:\n");
-    let balance_json = build_balance_json(snapshot, performance);
+    let balance_json = build_balance_json(snapshot);
     data.push_str("```json\n");
     data.push_str(&balance_json.to_string());
     data.push_str("\n```\n\n");
+
+    data.push_str("## 业绩情况:\n");
+    if let Some(summary) = performance {
+        let perf_json = json!({
+            "overall": summary.overall.as_ref().map(build_performance_stats_json),
+            "recent": summary.recent.as_ref().map(build_performance_stats_json),
+        });
+        data.push_str("```json\n");
+        data.push_str(&perf_json.to_string());
+        data.push_str("\n```\n\n");
+    } else {
+        data.push_str("```json\n");
+        data.push_str("{}\n");
+        data.push_str("\n```\n\n");
+    }
 
     // Positions
     data.push_str("## 持仓情况:\n");
@@ -145,10 +160,7 @@ fn build_snapshot(
     data
 }
 
-fn build_balance_json(
-    snapshot: &AccountSnapshot,
-    performance: Option<&PerformanceSummary>,
-) -> Value {
+fn build_balance_json(snapshot: &AccountSnapshot) -> Value {
     let mut balance_list = Vec::new();
     for balance in snapshot.balance.delta.iter().take(MAX_BALANCES) {
         let mut obj = json!({
@@ -175,20 +187,6 @@ fn build_balance_json(
 
     if let Some(eq) = snapshot.balance.total_equity {
         result["total_equity"] = json!(format_float(eq));
-    }
-
-    if let Some(summary) = performance {
-        let mut perf = json!({});
-        let perf_obj = perf.as_object_mut().unwrap();
-
-        if let Some(overall) = &summary.overall {
-            perf_obj.insert("overall".to_string(), build_performance_stats_json(overall));
-        }
-        if let Some(recent) = &summary.recent {
-            perf_obj.insert("recent".to_string(), build_performance_stats_json(recent));
-        }
-
-        result["performance"] = perf;
     }
 
     result
@@ -600,5 +598,4 @@ mod tests {
         assert!(!result.is_empty());
         assert!(result.contains("账户情况"));
     }
-
 }
