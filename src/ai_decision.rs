@@ -69,7 +69,7 @@ impl<'a> DecisionExecutor<'a> {
                     self.place_entry_order(&decision).await?
                 }
                 DecisionSignal::Close => self.execute_close_signal(&decision).await?,
-                DecisionSignal::CancelOrders => self.cancel_orders(&decision).await?,
+                DecisionSignal::CancelOrder => self.cancel_orders(&decision).await?,
             };
         }
         Ok(())
@@ -604,6 +604,6 @@ enum DecisionSignal {
     SellToEnter,
     Hold,
     Close,
-    CancelOrders,
+    CancelOrder,
     Wait,
 }

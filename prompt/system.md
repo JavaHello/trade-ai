@@ -54,7 +54,7 @@
    - 使用场景：当前仓位表现正常，或没有明确优势
 4. **close**：平掉某个已有仓位
    - 使用场景：达到止盈、触发止损、或交易逻辑失效
-5. **cancel_orders**：取消未成交的开多/开空限价单 (如果是已持仓的止盈止损单使用 close)
+5. **cancel_order**：取消未成交的开多/开空限价单 (如果是已持仓的止盈止损单使用 close)
    - 取消"buy_to_enter"或"sell_to_enter"限价单时必须同时取消对应的止盈止损单
    - 使用场景：市场条件变化，需要调整未成交订单
 6. **wait**：暂不操作，等待下一次决策周期
@@ -66,9 +66,9 @@
 - 对于有持仓的币种：
   - 只能使用： hold / close
 - 对于没有持仓的币种：
-  - 只能使用：buy_to_enter / sell_to_enter / hold / cancel_orders / wait
+  - 只能使用：buy_to_enter / sell_to_enter / hold / cancel_order / wait
 
-你必须对多空保持中立, 根据数据和规则做出最佳决策, 不要偏袒任何一方。
+你必须对多空保持中立, 根据数据和规则做出最佳决策。
 
 ## 仓位管理限制
 
@@ -134,7 +134,7 @@
 ```json
 [
   {
-  "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close" | "cancel_orders" | "wait",
+  "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close" | "cancel_order" | "wait",
   "coin": "<string>",
   "quantity": <float>,
   "leverage": <integer 1-20>,
@@ -160,11 +160,11 @@
 - 对于“有持仓”的币种，且 signal = `hold`：
   1.  `confidence` 必须提供
   2.  `invalidation_condition` 必须写明
-- `quantity`：除信号为 `hold`,`wait` 外，`quantity` 必须是 0.01 的整数倍（0.01 × n）
+- `quantity`：除信号为 `hold`,`wait` 外，必须是 0.01 的整数倍（0.01 × 需要的张数）
 - `buy_to_enter`(多单) → 止盈高于开仓价，止损低于开仓价, `entry_price` ≤ 当前价格
 - `sell_to_enter`(空单) → 止盈低于开仓价，止损高于开仓价, `entry_price` ≥ 当前价格
 - `justification`(说明文字 ) ≤ 500 字符: **[指标事实] + [趋势判断/风险依据] + [最终决策依据]。** 使用中文输出
-- `cancel_orders`：仅在 signal=`cancel_orders` 时使用，列出所有要取消的订单 ID
+- `cancel_orders`：仅在 signal=`cancel_order` 时使用，列出所有要取消的订单 ID
 
 ---
 
