@@ -616,7 +616,7 @@ struct AiDecisionPayload {
     stop_loss: f64,
     #[serde(default)]
     #[allow(dead_code)]
-    invalidation_condition: String,
+    invalidation_condition: Option<String>,
     #[serde(default, deserialize_with = "deserialize_f64")]
     #[allow(dead_code)]
     confidence: f64,
