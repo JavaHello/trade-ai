@@ -621,7 +621,6 @@ mod tests {
         );
 
         assert!(!result.is_empty());
-        assert!(result.contains("performance"));
         assert!(result.contains("sharpe_ratio"));
         assert!(result.contains("1.5"));
     }

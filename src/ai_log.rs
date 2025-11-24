@@ -100,19 +100,31 @@ impl AiDecisionRecord {
 
     fn parse_json_block(response: &str) -> Result<serde_json::Value, String> {
         match serde_json::from_str::<serde_json::Value>(response) {
-            Ok(value) => Ok(value),
+            Ok(value) => Self::unwrap_nested_json(value),
             Err(primary_err) => {
                 if let Some(slice) = Self::extract_json_slice(response, '[', ']') {
                     return serde_json::from_str::<serde_json::Value>(slice)
-                        .map_err(|err| format!("解析 JSON 数组片段失败: {err}"));
+                        .map_err(|err| format!("解析 JSON 数组片段失败: {err}"))
+                        .and_then(Self::unwrap_nested_json);
                 }
                 if let Some(slice) = Self::extract_json_slice(response, '{', '}') {
                     return serde_json::from_str::<serde_json::Value>(slice)
-                        .map_err(|err| format!("解析 JSON 对象片段失败: {err}"));
+                        .map_err(|err| format!("解析 JSON 对象片段失败: {err}"))
+                        .and_then(Self::unwrap_nested_json);
                 }
                 Err(format!("无法解析 AI JSON: {primary_err}"))
             }
         }
+    }
+
+    fn unwrap_nested_json(value: serde_json::Value) -> Result<serde_json::Value, String> {
+        if let serde_json::Value::String(text) = &value {
+            match serde_json::from_str::<serde_json::Value>(text) {
+                Ok(nested) => return Self::unwrap_nested_json(nested),
+                Err(err) => return Err(format!("解析嵌套 JSON 失败: {err}")),
+            }
+        }
+        Ok(value)
     }
 
     fn extract_json_slice<'a>(response: &'a str, start: char, end: char) -> Option<&'a str> {
@@ -309,12 +321,12 @@ pub enum AiDecisionSignal {
 impl AiDecisionSignal {
     fn from_str(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "buy_to_enter" => Some(AiDecisionSignal::BuyToEnter),
-            "sell_to_enter" => Some(AiDecisionSignal::SellToEnter),
-            "hold" => Some(AiDecisionSignal::Hold),
-            "close" => Some(AiDecisionSignal::Close),
-            "cancel_order" => Some(AiDecisionSignal::Cancel),
-            "wait" => Some(AiDecisionSignal::Wait),
+            "bte" | "buy_to_enter" | "buy" => Some(AiDecisionSignal::BuyToEnter),
+            "ste" | "sell_to_enter" | "sell" => Some(AiDecisionSignal::SellToEnter),
+            "h" | "hold" => Some(AiDecisionSignal::Hold),
+            "c" | "close" => Some(AiDecisionSignal::Close),
+            "cancel_order" | "cancel" => Some(AiDecisionSignal::Cancel),
+            "w" | "wait" => Some(AiDecisionSignal::Wait),
             _ => None,
         }
     }
@@ -348,6 +360,7 @@ pub struct AiDecisionOperation {
     pub coin: String,
     pub quantity: Option<f64>,
     pub leverage: Option<f64>,
+    pub entry_price: Option<f64>,
     pub profit_target: Option<f64>,
     pub stop_loss: Option<f64>,
     pub invalidation: Option<String>,
@@ -358,26 +371,51 @@ pub struct AiDecisionOperation {
 
 impl AiDecisionOperation {
     fn from_value(value: &serde_json::Value) -> Option<Self> {
-        let signal = value.get("signal")?.as_str()?;
+        let signal = value.get("sig").or_else(|| value.get("signal"))?.as_str()?;
         let signal = AiDecisionSignal::from_str(signal)?;
         let coin = value
-            .get("coin")
+            .get("c")
+            .or_else(|| value.get("coin"))
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())?;
-        let quantity = value.get("quantity").and_then(Self::parse_number);
-        let leverage = value.get("leverage").and_then(Self::parse_number);
-        let profit_target = value.get("profit_target").and_then(Self::parse_number);
-        let stop_loss = value.get("stop_loss").and_then(Self::parse_number);
+        let quantity = value
+            .get("qty")
+            .or_else(|| value.get("quantity"))
+            .and_then(Self::parse_number);
+        let leverage = value
+            .get("lev")
+            .or_else(|| value.get("leverage"))
+            .and_then(Self::parse_number);
+        let entry_price = value
+            .get("ep")
+            .or_else(|| value.get("entry_price"))
+            .and_then(Self::parse_number);
+        let profit_target = value
+            .get("tp")
+            .or_else(|| value.get("profit_target"))
+            .and_then(Self::parse_number);
+        let stop_loss = value
+            .get("sl")
+            .or_else(|| value.get("stop_loss"))
+            .and_then(Self::parse_number);
         let invalidation = value
-            .get("invalidation_condition")
+            .get("inv")
+            .or_else(|| value.get("invalidation_condition"))
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let confidence = value.get("confidence").and_then(Self::parse_number);
-        let risk_usd = value.get("risk_usd").and_then(Self::parse_number);
+        let confidence = value
+            .get("conf")
+            .or_else(|| value.get("confidence"))
+            .and_then(Self::parse_number);
+        let risk_usd = value
+            .get("risk")
+            .or_else(|| value.get("risk_usd"))
+            .and_then(Self::parse_number);
         let justification = value
-            .get("justification")
+            .get("just")
+            .or_else(|| value.get("justification"))
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
@@ -386,6 +424,7 @@ impl AiDecisionOperation {
             coin,
             quantity,
             leverage,
+            entry_price,
             profit_target,
             stop_loss,
             invalidation,
@@ -457,6 +496,11 @@ impl AiDecisionOperation {
         }
         if !stats.is_empty() {
             lines.push(stats.join(" · "));
+        }
+        if let Some(entry) = self.entry_price {
+            if entry.is_sign_positive() {
+                lines.push(format!("入场价 {}", Self::format_number(entry)));
+            }
         }
         if let Some(target) = self.profit_target {
             if target.is_sign_positive() {

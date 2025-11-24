@@ -548,84 +548,48 @@ fn ai_operator_name(name: &str) -> TradeOperator {
 }
 
 fn parse_ai_decisions(raw: &str) -> Result<Vec<AiDecisionPayload>> {
-    let value = match serde_json::from_str::<serde_json::Value>(raw) {
-        Ok(value) => value,
-        Err(_) => {
-            if let (Some(start), Some(end)) = (raw.find('['), raw.rfind(']')) {
-                if end <= start {
-                    return Err(anyhow!("无法截取 AI JSON"));
-                }
-                let slice = raw
-                    .get(start..=end)
-                    .ok_or_else(|| anyhow!("无法截取 AI JSON"))?;
-                serde_json::from_str::<serde_json::Value>(slice)
-                    .map_err(|err| anyhow!("解析 JSON 失败: {err}"))?
+    let value = parse_json_value(raw)?;
+    match parse_decision_value(&value) {
+        Ok(decisions) => Ok(decisions),
+        Err(err) => {
+            if let serde_json::Value::String(text) = value {
+                let nested = parse_json_value(&text)?;
+                parse_decision_value(&nested)
             } else {
-                let start = raw.find('{').ok_or_else(|| anyhow!("缺少 JSON 起始"))?;
-                let end = raw.rfind('}').ok_or_else(|| anyhow!("缺少 JSON 结束"))?;
-                if end <= start {
-                    return Err(anyhow!("无法截取 AI JSON"));
-                }
-                let slice = raw
-                    .get(start..=end)
-                    .ok_or_else(|| anyhow!("无法截取 AI JSON"))?;
-                serde_json::from_str::<serde_json::Value>(slice)
-                    .map_err(|err| anyhow!("解析 JSON 失败: {err}"))?
+                Err(err)
             }
         }
-    };
-    match value {
-        serde_json::Value::Array(items) => {
-            let mut decisions = Vec::new();
-            for (idx, item) in items.into_iter().enumerate() {
-                if item.is_null() {
-                    continue;
-                }
-                let payload = serde_json::from_value::<AiDecisionPayload>(item)
-                    .map_err(|err| anyhow!("解析第 {} 个 AI 决策失败: {err}", idx + 1))?;
-                decisions.push(payload);
-            }
-            if decisions.is_empty() {
-                Err(anyhow!("AI 决策数组为空"))
-            } else {
-                Ok(decisions)
-            }
-        }
-        serde_json::Value::Object(_) => {
-            let payload = serde_json::from_value::<AiDecisionPayload>(value)
-                .map_err(|err| anyhow!("解析 AI 决策失败: {err}"))?;
-            Ok(vec![payload])
-        }
-        _ => Err(anyhow!("AI 决策必须是 JSON 对象或数组")),
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct AiDecisionPayload {
+    #[serde(alias = "sig")]
     signal: DecisionSignal,
+    #[serde(alias = "c")]
     coin: String,
-    #[serde(default, deserialize_with = "deserialize_f64")]
+    #[serde(default, alias = "qty", deserialize_with = "deserialize_f64")]
     quantity: f64,
-    #[serde(default, deserialize_with = "deserialize_f64")]
+    #[serde(default, alias = "lev", deserialize_with = "deserialize_f64")]
     leverage: f64,
-    #[serde(default, deserialize_with = "deserialize_f64")]
+    #[serde(default, alias = "ep", deserialize_with = "deserialize_f64")]
     entry_price: f64,
-    #[serde(default, deserialize_with = "deserialize_f64")]
+    #[serde(default, alias = "tp", deserialize_with = "deserialize_f64")]
     profit_target: f64,
-    #[serde(default, deserialize_with = "deserialize_f64")]
+    #[serde(default, alias = "sl", deserialize_with = "deserialize_f64")]
     stop_loss: f64,
-    #[serde(default)]
+    #[serde(default, alias = "inv")]
     #[allow(dead_code)]
     invalidation_condition: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_f64")]
+    #[serde(default, alias = "conf", deserialize_with = "deserialize_f64")]
     #[allow(dead_code)]
     confidence: f64,
     #[serde(default)]
     cancel_orders: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "deserialize_f64")]
+    #[serde(default, alias = "risk", deserialize_with = "deserialize_f64")]
     #[allow(dead_code)]
     risk_usd: f64,
-    #[serde(default)]
+    #[serde(default, alias = "just")]
     #[allow(dead_code)]
     justification: String,
 }
@@ -692,6 +656,78 @@ where
     deserializer.deserialize_any(F64Visitor)
 }
 
+fn parse_json_value(raw: &str) -> Result<serde_json::Value> {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            if let (Some(start), Some(end)) = (raw.find('['), raw.rfind(']')) {
+                if end <= start {
+                    return Err(anyhow!("无法截取 AI JSON"));
+                }
+                let slice = raw
+                    .get(start..=end)
+                    .ok_or_else(|| anyhow!("无法截取 AI JSON"))?;
+                serde_json::from_str::<serde_json::Value>(slice)
+                    .map_err(|err| anyhow!("解析 JSON 失败: {err}"))
+            } else {
+                let start = raw.find('{').ok_or_else(|| anyhow!("缺少 JSON 起始"))?;
+                let end = raw.rfind('}').ok_or_else(|| anyhow!("缺少 JSON 结束"))?;
+                if end <= start {
+                    return Err(anyhow!("无法截取 AI JSON"));
+                }
+                let slice = raw
+                    .get(start..=end)
+                    .ok_or_else(|| anyhow!("无法截取 AI JSON"))?;
+                serde_json::from_str::<serde_json::Value>(slice)
+                    .map_err(|err| anyhow!("解析 JSON 失败: {err}"))
+            }
+        }
+    }
+}
+
+fn parse_decision_value(value: &serde_json::Value) -> Result<Vec<AiDecisionPayload>> {
+    match value {
+        serde_json::Value::Array(items) => {
+            let mut decisions = Vec::new();
+            for (idx, item) in items.iter().enumerate() {
+                if item.is_null() {
+                    continue;
+                }
+                let payload = serde_json::from_value::<AiDecisionPayload>(item.clone())
+                    .map_err(|err| anyhow!("解析第 {} 个 AI 决策失败: {err}", idx + 1))?;
+                decisions.push(payload);
+            }
+            if decisions.is_empty() {
+                Err(anyhow!("AI 决策数组为空"))
+            } else {
+                Ok(decisions)
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(ops) = map.get("operations") {
+                return parse_decision_value(ops);
+            }
+            if let Some(resp) = map.get("response") {
+                return match resp {
+                    serde_json::Value::String(text) => {
+                        let nested = parse_json_value(text)?;
+                        parse_decision_value(&nested)
+                    }
+                    _ => parse_decision_value(resp),
+                };
+            }
+            let payload = serde_json::from_value::<AiDecisionPayload>(value.clone())
+                .map_err(|err| anyhow!("解析 AI 决策失败: {err}"))?;
+            Ok(vec![payload])
+        }
+        serde_json::Value::String(text) => {
+            let nested = parse_json_value(text)?;
+            parse_decision_value(&nested)
+        }
+        _ => Err(anyhow!("AI 决策必须是 JSON 对象或数组")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,13 +736,13 @@ mod tests {
     fn parses_wrapped_operations_with_string_numbers() {
         let raw = r#"{
             "operations": [{
-                "signal": "buy_to_enter",
-                "coin": "BTC-USDT-SWAP",
-                "quantity": "0.01",
-                "leverage": "3",
-                "entry_price": "90000.5",
-                "profit_target": "90500",
-                "stop_loss": "89000"
+                "sig": "bte",
+                "c": "BTC-USDT-SWAP",
+                "qty": "0.01",
+                "lev": "3",
+                "ep": "90000.5",
+                "tp": "90500",
+                "sl": "89000"
             }]
         }"#;
         let decisions = parse_ai_decisions(raw).expect("should parse decisions");
@@ -720,7 +756,7 @@ mod tests {
 
     #[test]
     fn parses_string_wrapped_response_array() {
-        let raw = r#"{"response": "[{\"signal\":\"hold\",\"coin\":\"ETH-USDT-SWAP\"}]" }"#;
+        let raw = r#"{"response": "[{\"sig\":\"h\",\"c\":\"ETH-USDT-SWAP\"}]" }"#;
         let decisions = parse_ai_decisions(raw).expect("should parse wrapped response");
         assert_eq!(decisions.len(), 1);
         assert!(matches!(decisions[0].signal, DecisionSignal::Hold));
@@ -728,8 +764,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Deserialize, Copy, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum DecisionSignal {
     BuyToEnter,
     SellToEnter,
@@ -737,4 +772,29 @@ enum DecisionSignal {
     Close,
     CancelOrder,
     Wait,
+}
+
+impl DecisionSignal {
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "bte" | "buy_to_enter" | "buy" => Some(DecisionSignal::BuyToEnter),
+            "ste" | "sell_to_enter" | "sell" => Some(DecisionSignal::SellToEnter),
+            "h" | "hold" => Some(DecisionSignal::Hold),
+            "c" | "close" => Some(DecisionSignal::Close),
+            "cancel_order" | "cancel" => Some(DecisionSignal::CancelOrder),
+            "w" | "wait" => Some(DecisionSignal::Wait),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DecisionSignal {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        DecisionSignal::from_str(&value)
+            .ok_or_else(|| de::Error::custom(format!("未知的决策信号: {value}")))
+    }
 }

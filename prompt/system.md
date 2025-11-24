@@ -40,22 +40,22 @@
 
 # 动作定义
 
-1. **buy_to_enter**：开多（做多上涨）
+1. **bte**：开多（做多上涨）
    - 使用场景：看涨技术形态、正向动能、风险回报偏向上涨
-2. **sell_to_enter**：开空（做空下跌）
+2. **ste**：开空（做空下跌）
    - 使用场景：看跌技术形态、负向动能、风险回报偏向下跌
-3. **hold**：保持当前仓位不动（仅当该币种已有仓位时可用）
+3. **h**：保持当前仓位不动（仅当该币种已有仓位时可用）
    - 使用场景：当前仓位表现正常，或没有明确优势
-4. **close**：平掉某个已有仓位
+4. **c**：平掉某个已有仓位
    - 使用场景：达到止盈、触发止损、或交易逻辑失效
-5. **wait**：暂不操作，等待下一次决策周期
+5. **w**：暂不操作，等待下一次决策周期
 
 ## 动作要求 (严格遵守)
 
 - 对于有持仓的币种：
-  - 只能使用： hold / close
+  - 只能使用： h / c
 - 对于没有持仓的币种：
-  - 只能使用：buy_to_enter / sell_to_enter / wait（不允许使用 hold）
+  - 只能使用：bte / ste / w
 
 ---
 
@@ -89,23 +89,23 @@
 
 每一笔开仓交易，你必须明确写出：
 
-1. **entry_price**（开仓价）
+1. **ep**（开仓价）
    - 使用当前市场价
-2. **profit_target**（止盈价）
+2. **tp**（止盈价）
    - 根据近期波动设定合理目标
    - 根据阻力位、斐波那契扩展、波动带等设定
-3. **stop_loss**（止损价）
+3. **sl**（止损价）
    - 控制每笔损失在账户价值的 1-3%
    - 放在关键支撑/阻力之外，避免被假突破扫掉
-4. **invalidation_condition**（失效条件）
+4. **inv**（失效条件）
    - 明确、客观、可观察的信号
    - 示例："BTC 跌破 $100k"、"RSI < 30"、"资金费率转负"
-5. **confidence**（信心度, 0-1）
+5. **conf**（信心度, 0-1）
    - 0.0-0.3：低信心（最好别做或极小仓位）
    - 0.3-0.6：观望级信心（仅评估行情，不开仓）
    - 0.6-0.8：高信心（允许按规则开仓）
    - 0.8-1.0：非常高信心（谨慎避免过度自信）
-6. **risk_usd**（风险金额，USDT）
+6. **risk**（风险金额，USDT）
    - 计算方式：
      ```
      |开仓价 - 止损价| × 仓位数量
@@ -120,17 +120,17 @@
 ```json
 [
   {
-    "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close" | "wait",
-    "coin": "<string>",
-    "quantity": <float>,
-    "leverage": <integer 1-20>,
-    "entry_price": <float | null>,
-    "profit_target": <float | null>,
-    "stop_loss": <float | null>,
-    "invalidation_condition": "<string>",
-    "confidence": <float 0-1>,
-    "risk_usd": <float | null>,
-    "justification": "<string>"
+  "just": "<string>",
+  "sig": "bte" | "ste" | "h" | "c" | "w",
+  "c": "<string>",
+  "qty": <float>,
+  "lev": <integer 1-20>,
+  "ep": <float>,
+  "tp": <float>,
+  "sl": <float>,
+  "inv": "<string>",
+  "conf": <float 0-1>,
+  "risk": <float>
   },
   {
     // ...
@@ -138,22 +138,19 @@
 ]
 ```
 
-### 字段填写要求
+### 字段说明
 
-- `buy_to_enter` / `sell_to_enter`：所有字段需根据计划仓位填写；`entry_price` 为开仓价，`profit_target`/`stop_loss` 为对应价格，`risk_usd` 为真实风险。
-- `hold`：仅适用于已有仓位；`quantity`、`entry_price`、`profit_target`、`stop_loss`、`risk_usd` 必须填当前仓位参数，不能为 null。
-- `close`：`quantity` 等于当前仓位数量，`entry_price` 填计划平仓价格（市价），`risk_usd` 可填 0，需说明止盈止损失效条件。
-- `wait`：无操作，`quantity`、`entry_price`、`profit_target`、`stop_loss`、`risk_usd` 可填 0 或 null 或不输出字段。
-
-### 输出验证规则
-
-- 对于“有持仓”的币种，且 signal = `hold`：
-  1.  `confidence` 必须提供
-  2.  `invalidation_condition` 必须写明
-- `quantity`：除信号为 `hold`,`wait` 外，必须是 0.01 的整数倍（0.01 × 需要的张数）
-- `buy_to_enter`(多单) → 止盈高于开仓价，止损低于开仓价, `entry_price` ≤ 当前价格
-- `sell_to_enter`(空单) → 止盈低于开仓价，止损高于开仓价, `entry_price` ≥ 当前价格
-- `justification`(说明文字 ) ≤ 200 字符: **[指标事实] + [趋势判断/风险依据] + [最终决策依据]。** 使用中文输出
+- `sig` : 交易信号, bte = 买入开多, ste = 卖出开空, h = 保持持仓, c = 平仓, w = 等待
+- `c` : 币种
+- `qty` : 数量
+- `lev` : 杠杆
+- `ep` : 入场价
+- `tp` : 止盈价（Take Profit）
+- `sl` : 止损价（Stop Loss）
+- `inv` : 失效条件
+- `conf` : 信心值（0~1）
+- `risk` : 风险金额（USDT）
+- `just` : 决策理由说明
 
 ---
 
@@ -181,22 +178,13 @@ Sharpe Ratio = (平均收益 - 无风险利率) / 收益标准差
 
 你拥有的完整数据：
 
-- 原始序列：5分钟、4小时K线序列
+- 原始序列：5分钟、15分钟、4小时K线序列
 - 技术序列：EMA20序列、MACD序列、RSI7序列、RSI14序列
-
-分析方法（完全由你自主决定）：
-
-- 自由运用序列数据，你可以做但不限于趋势分析、形态识别、支撑阻力、技术阻力位、斐波那契、波动带计算
-- 多维度交叉验证（价格+量+OI+指标+序列形态）
-- 用你认为最有效的方法发现高确定性机会
-- 必须对多空态度保持中立, 不要过度担心开空的风险, 只要逻辑成立就可以开空, 根据你的分析做出最佳决策。
-- 综合信心度 ≥ 0.6 才开仓
+- 分析方法（完全由你自主决定）
 
 避免低质量信号：
 
 - 单一维度（只看一个指标）
-- 相互矛盾（涨但量萎缩）
-- 横盘震荡
 
 ---
 
