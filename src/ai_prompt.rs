@@ -260,7 +260,7 @@ fn build_positions_json(snapshot: &AccountSnapshot, timezone: ConfiguredTimeZone
             if let Some(ratio) = pos.upl_ratio {
                 map.insert(
                     "pnl_ratio_pct".to_string(),
-                    json!(format!("{:.2}", ratio * 100.0)),
+                    json!(format_float_2(ratio * 100.0)),
                 );
             }
             if let Some(lev) = pos.lever {
@@ -355,49 +355,49 @@ fn build_market_analytics_json(
             {
                 "label": "1分钟指标",
                 "interval": "1m",
-                "ema20": format_series_json(&entry.intraday_1m_ema20),
-                "macd": format_series_json(&entry.intraday_1m_macd),
-                "rsi7": format_series_json(&entry.intraday_1m_rsi7),
-                "rsi14": format_series_json(&entry.intraday_1m_rsi14),
+                "ema20": format_series_json_2(&entry.intraday_1m_ema20),
+                "macd": format_series_json_2(&entry.intraday_1m_macd),
+                "rsi7": format_series_json_2(&entry.intraday_1m_rsi7),
+                "rsi14": format_series_json_2(&entry.intraday_1m_rsi14),
             },
             {
                 "label": "3分钟指标",
                 "interval": "3m",
-                "ema20": format_series_json(&entry.intraday_3m_ema20),
-                "macd": format_series_json(&entry.intraday_3m_macd),
-                "rsi7": format_series_json(&entry.intraday_3m_rsi7),
-                "rsi14": format_series_json(&entry.intraday_3m_rsi14),
+                "ema20": format_series_json_2(&entry.intraday_3m_ema20),
+                "macd": format_series_json_2(&entry.intraday_3m_macd),
+                "rsi7": format_series_json_2(&entry.intraday_3m_rsi7),
+                "rsi14": format_series_json_2(&entry.intraday_3m_rsi14),
             },
             {
                 "label": "5分钟指标",
                 "interval": "5m",
                 "close_prices": format_series_json(&entry.intraday_5m_prices),
-                "ema20": format_series_json(&entry.intraday_5m_ema20),
-                "macd": format_series_json(&entry.intraday_5m_macd),
-                "rsi7": format_series_json(&entry.intraday_5m_rsi7),
-                "rsi14": format_series_json(&entry.intraday_5m_rsi14),
+                "ema20": format_series_json_2(&entry.intraday_5m_ema20),
+                "macd": format_series_json_2(&entry.intraday_5m_macd),
+                "rsi7": format_series_json_2(&entry.intraday_5m_rsi7),
+                "rsi14": format_series_json_2(&entry.intraday_5m_rsi14),
                 "taker_volume": build_taker_volume_json(&entry.taker_volume_5m),
                 "long_short_account_ratio": build_long_short_account_ratio_json(&entry.long_short_account_ratio_5m),
             },
             {
                 "label": "15分钟指标",
                 "interval": "15m",
-                "ema20": format_series_json(&entry.intraday_15m_ema20),
-                "macd": format_series_json(&entry.intraday_15m_macd),
-                "rsi7": format_series_json(&entry.intraday_15m_rsi7),
-                "rsi14": format_series_json(&entry.intraday_15m_rsi14),
+                "ema20": format_series_json_2(&entry.intraday_15m_ema20),
+                "macd": format_series_json_2(&entry.intraday_15m_macd),
+                "rsi7": format_series_json_2(&entry.intraday_15m_rsi7),
+                "rsi14": format_series_json_2(&entry.intraday_15m_rsi14),
             },
             {
                 "label": "4小时指标",
                 "interval": "4h",
-                "ema20": format_series_json(&entry.swing_ema20),
-                "ema50": format_series_json(&entry.swing_ema50),
-                "atr3": format_series_json(&entry.swing_atr3),
-                "atr14": format_series_json(&entry.swing_atr14),
+                "ema20": format_series_json_2(&entry.swing_ema20),
+                "ema50": format_series_json_2(&entry.swing_ema50),
+                "atr3": format_series_json_2(&entry.swing_atr3),
+                "atr14": format_series_json_2(&entry.swing_atr14),
                 "volume_current": optional_float(entry.swing_volume_current),
                 "volume_avg": optional_float(entry.swing_volume_avg),
-                "macd": format_series_json(&entry.swing_macd),
-                "rsi14": format_series_json(&entry.swing_rsi14),
+                "macd": format_series_json_2(&entry.swing_macd),
+                "rsi14": format_series_json_2(&entry.swing_rsi14),
             }
         ]
     })
@@ -407,8 +407,8 @@ fn build_long_short_account_ratio_json(ratios: &Vec<LongShortRatio>) -> Value {
         .iter()
         .map(|t| {
             json!({
-                "t": format!("{}", (t.ts / 1000) as i64),
-                "ratios": format!("{:.2}", t.ratio),
+                "t": (t.ts / 1000) as u64,
+                "ratios": format_float_2(t.ratio),
             })
         })
         .collect();
@@ -421,7 +421,7 @@ fn build_taker_volume_json(taker_volumes: &Vec<TakerVolume>) -> Value {
         .iter()
         .map(|t| {
             json!({
-                "t": format!("{}", (t.timestamp_ms / 1000) as i64),
+                "t": (t.timestamp_ms / 1000) as u64,
                 "s": format_float(t.buy),
                 "b": format_float(t.sell),
             })
@@ -436,7 +436,7 @@ fn build_kline_table_json(candles: &Vec<KlineRecord>, interval: &str) -> Value {
         .iter()
         .map(|candle| {
             json!({
-                "t": format!("{}", (candle.timestamp_ms / 1000) as i64),
+                "t": (candle.timestamp_ms / 1000) as u64,
                 "o": format_float(candle.open),
                 "h": format_float(candle.high),
                 "l": format_float(candle.low),
@@ -453,8 +453,13 @@ fn build_kline_table_json(candles: &Vec<KlineRecord>, interval: &str) -> Value {
     })
 }
 
+fn format_series_json_2(values: &[f64]) -> Value {
+    let formatted: Vec<f64> = values.iter().map(|v| format_float_2(*v)).collect();
+    json!(formatted)
+}
+
 fn format_series_json(values: &[f64]) -> Value {
-    let formatted: Vec<String> = values.iter().map(|v| format_float(*v)).collect();
+    let formatted: Vec<f64> = values.iter().map(|v| format_float(*v)).collect();
     json!(formatted)
 }
 
@@ -468,17 +473,17 @@ fn optional_float(value: Option<f64>) -> Value {
     }
 }
 
-fn format_float_2(value: f64) -> String {
-    format!("{value:.2}")
+fn format_float_2(value: f64) -> f64 {
+    (value * 100.0).trunc() / 100.0
 }
 
-fn format_float(value: f64) -> String {
+fn format_float(value: f64) -> f64 {
     if value.abs() >= 100.0 {
-        format!("{value:.2}")
+        (value * 100.0).trunc() / 100.0
     } else if value.abs() >= 1.0 {
-        format!("{value:.4}")
+        (value * 1000.0).trunc() / 1000.0
     } else {
-        format!("{value:.6}")
+        (value * 100000.0).trunc() / 100000.0
     }
 }
 
