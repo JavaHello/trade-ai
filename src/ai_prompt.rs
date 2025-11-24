@@ -161,6 +161,13 @@ fn build_snapshot(
     // Positions
     data.push_str("## 持仓情况:\n");
     let positions_json = build_positions_json(snapshot, timezone);
+    data.push_str("持仓字段说明: \n");
+    data.push_str("- side: 持仓方向\n");
+    data.push_str("- size: 持仓数量(张数)\n");
+    data.push_str("- avg_price: 持仓均价(买入价格 USDT)\n");
+    data.push_str("- margin: 占用保证金(USDT)\n");
+    data.push_str("- unrealized_pnl: 未实现盈亏(USDT)\n");
+    data.push_str("- pnl_ratio_pct: 盈亏比例（百分比）\n");
     data.push_str("```json\n");
     data.push_str(&positions_json.to_string());
     data.push_str("\n```\n\n");
@@ -239,16 +246,16 @@ fn build_positions_json(snapshot: &AccountSnapshot, timezone: ConfiguredTimeZone
             let mut obj = json!({
                 "inst_id": pos.inst_id,
                 "side": side,
-                "size": format_float(pos.size),
-                "margin": format_float(pos.imr),
+                "size": format_float_2(pos.size),
+                "margin": format_float_2(pos.imr),
             });
             let map = obj.as_object_mut().unwrap();
 
             if let Some(px) = pos.avg_px {
-                map.insert("avg_price".to_string(), json!(format_float(px)));
+                map.insert("avg_price".to_string(), json!(format_float_2(px)));
             }
             if let Some(upl) = pos.upl {
-                map.insert("unrealized_pnl".to_string(), json!(format_float(upl)));
+                map.insert("unrealized_pnl".to_string(), json!(format_float_2(upl)));
             }
             if let Some(ratio) = pos.upl_ratio {
                 map.insert(
@@ -257,7 +264,7 @@ fn build_positions_json(snapshot: &AccountSnapshot, timezone: ConfiguredTimeZone
                 );
             }
             if let Some(lev) = pos.lever {
-                map.insert("leverage".to_string(), json!(format_float(lev)));
+                map.insert("leverage".to_string(), json!(lev as u64));
             }
             if let Some(ts) = format_timestamp_label(pos.create_time, timezone) {
                 map.insert("create_time".to_string(), json!(ts));
@@ -280,7 +287,7 @@ fn build_orders_json(snapshot: &AccountSnapshot, timezone: ConfiguredTimeZone) -
                 "ord_id": order.ord_id,
                 "inst_id": order.inst_id,
                 "side": order.side,
-                "size": format_float(order.size),
+                "size": format_float_2(order.size),
                 "state": order.state,
             });
             let map = obj.as_object_mut().unwrap();
@@ -303,13 +310,16 @@ fn build_orders_json(snapshot: &AccountSnapshot, timezone: ConfiguredTimeZone) -
                 map.insert("tag".to_string(), json!(tag_label));
             }
             if let Some(trigger_px) = order.trigger_price {
-                map.insert("trigger_price".to_string(), json!(format_float(trigger_px)));
+                map.insert(
+                    "trigger_price".to_string(),
+                    json!(format_float_2(trigger_px)),
+                );
             }
             if let Some(limit_px) = order.price {
-                map.insert("limit_price".to_string(), json!(format_float(limit_px)));
+                map.insert("limit_price".to_string(), json!(format_float_2(limit_px)));
             }
             if let Some(lev) = order.lever {
-                map.insert("leverage".to_string(), json!(format_float(lev)));
+                map.insert("leverage".to_string(), json!(lev as u64));
             }
             if order.reduce_only {
                 map.insert("reduce_only".to_string(), json!(true));
@@ -456,6 +466,10 @@ fn optional_float(value: Option<f64>) -> Value {
         Some(v) => json!(format_float(v)),
         None => json!(null),
     }
+}
+
+fn format_float_2(value: f64) -> String {
+    format!("{value:.2}")
 }
 
 fn format_float(value: f64) -> String {
